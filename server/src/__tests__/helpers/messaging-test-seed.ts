@@ -1,5 +1,6 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
+  authUsers,
   messagingChannels,
   messagingIdentities,
   messagingMessageRefs,
@@ -15,6 +16,20 @@ import {
 } from "../../messaging/index.js";
 
 type Db = SchemaDb extends infer _ ? any : never;
+
+async function ensureAuthUser(db: Db, userId: string): Promise<void> {
+  const now = new Date();
+  await db
+    .insert(authUsers)
+    .values({
+      id: userId,
+      name: userId,
+      email: `${userId}@example.test`,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoNothing({ target: authUsers.id });
+}
 
 // Re-initialize messaging for each test run with a fresh FakeAdapter echo.
 export function ensureTestMessaging(db: Db): void {
@@ -40,8 +55,15 @@ export async function seedMessagingIdentity(
   if (!args.agentId && !args.userId) {
     throw new Error("seedMessagingIdentity requires agentId or userId");
   }
+  if (args.userId) {
+    await ensureAuthUser(db, args.userId);
+  }
+  // Scope externalUserRef by companyId so fixtures across companies don't
+  // collide on the (backend, externalUserRef) unique index.
+  const principal = args.agentId ?? args.userId ?? "anon";
   const externalUserRef =
-    args.externalUserRef ?? `U_${(args.agentId ?? args.userId ?? "anon").slice(0, 8)}`;
+    args.externalUserRef ??
+    `U_${args.companyId.slice(0, 8)}_${principal.slice(0, 12)}`;
 
   // Skip if already present for this (companyId, backend, agent|user).
   const where = args.agentId
@@ -189,6 +211,7 @@ export async function seedMessagingComment(
   }
 
   const externalMessageRef = `M_test_${Math.random().toString(36).slice(2, 10)}`;
+  if (args.authorUserId) await ensureAuthUser(db, args.authorUserId);
   const [refRow] = await db
     .insert(messagingMessageRefs)
     .values({
@@ -278,6 +301,7 @@ export async function postTestComment(
  */
 export async function clearMessagingFixtures(db: Db): Promise<void> {
   void projects;
+  void sql;
   await db.delete(messagingMessageRefs);
   await db.delete(messagingThreads);
   await db.delete(messagingChannels);
