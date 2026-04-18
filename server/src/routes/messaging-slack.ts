@@ -4,6 +4,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Db } from "../messaging/router.js";
 import {
   agents as agentsTable,
+  messagingCompanyConfig,
   messagingIdentities,
   messagingWorkspaceInstall,
   companySecrets,
@@ -19,6 +20,7 @@ import {
   getSigningSecretForCompany,
 } from "../messaging/adapters/slack/token-store.js";
 import {
+  invalidateMessagingContext,
   isMessagingInitialized,
   resolveMessagingContext,
 } from "../messaging/index.js";
@@ -278,6 +280,19 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
         .returning({ id: messagingWorkspaceInstall.id });
       workspaceInstallId = inserted!.id;
     }
+
+    // Enable messaging for the company. Phase 1 is Slack-or-disabled, and a
+    // successful bot install means the operator has chosen Slack — flip
+    // activeBackend so resolveMessagingContext returns "ready" without
+    // requiring a separate manual toggle. Upsert so re-install is idempotent.
+    await db
+      .insert(messagingCompanyConfig)
+      .values({ companyId, activeBackend: "slack" })
+      .onConflictDoUpdate({
+        target: messagingCompanyConfig.companyId,
+        set: { activeBackend: "slack", updatedAt: new Date() },
+      });
+    invalidateMessagingContext(companyId);
 
     // Auto-discover inbox identities: match Slack workspace users by email
     // to Paperclip auth users and insert identity rows so per-human DMs can

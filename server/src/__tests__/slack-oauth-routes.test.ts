@@ -10,6 +10,7 @@ import {
   companySecrets,
   companySecretVersions,
   createDb,
+  messagingCompanyConfig,
   messagingIdentities,
   messagingWorkspaceInstall,
 } from "@paperclipai/db";
@@ -113,6 +114,7 @@ describeIf("messaging slack oauth routes", () => {
 
   afterEach(async () => {
     await db.delete(messagingIdentities);
+    await db.delete(messagingCompanyConfig);
     await db.delete(messagingWorkspaceInstall);
     await db.delete(companySecretVersions);
     await db.delete(companySecrets);
