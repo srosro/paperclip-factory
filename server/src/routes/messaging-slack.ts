@@ -11,11 +11,16 @@ import {
 } from "@paperclipai/db";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
 import { badRequest, conflict, notFound, unprocessable } from "../errors.js";
+import { verifySlackSignature } from "../messaging/adapters/slack/signing.js";
 import {
   storeBotToken,
   storeSigningSecret,
   storeUserToken,
+  getSigningSecretForCompany,
 } from "../messaging/adapters/slack/token-store.js";
+import { messagingRegistry } from "../messaging/registry.js";
+import { getEventsProcessor, isMessagingInitialized } from "../messaging/index.js";
+import { logger } from "../middleware/logger.js";
 
 const BOT_SCOPES = [
   "channels:read",
@@ -399,6 +404,147 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
 
     res.redirect(`/companies/${companyId}/agents/${agentId}?slack_linked=1`);
   });
+
+  // ---------- Events API webhook ----------
+  router.post("/events", async (req: Request, res: Response) => {
+    // URL verification short-circuit (Slack does sign these, but accepting
+    // them unverified keeps initial app setup smooth; signature verification
+    // below applies to all other event payloads).
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.type === "url_verification" && typeof body.challenge === "string") {
+      res.json({ challenge: body.challenge });
+      return;
+    }
+
+    const env = readEnv();
+    const stashedRaw = (req as unknown as { rawBody?: Buffer }).rawBody;
+    const rawBody = stashedRaw ? stashedRaw.toString("utf-8") : "";
+    const timestampHeader = req.header("x-slack-request-timestamp") ?? "";
+    const signatureHeader = req.header("x-slack-signature") ?? "";
+
+    // Locate the install by team_id to pick the correct signing secret.
+    const teamId = typeof body.team_id === "string" ? body.team_id : null;
+    let signingSecret: string | null = null;
+    let companyId: string | null = null;
+
+    if (teamId) {
+      const [install] = await db
+        .select()
+        .from(messagingWorkspaceInstall)
+        .where(
+          and(
+            eq(messagingWorkspaceInstall.backend, "slack"),
+            eq(messagingWorkspaceInstall.externalWorkspaceRef, teamId),
+          ),
+        )
+        .limit(1);
+      if (install) {
+        companyId = install.companyId;
+        signingSecret = await getSigningSecretForCompany(db, install.companyId);
+      }
+    }
+    // Fall back to env-level signing secret if no per-workspace one is stored.
+    if (!signingSecret && env?.signingSecret) {
+      signingSecret = env.signingSecret;
+    }
+    if (!signingSecret) {
+      res.status(401).json({ error: "no signing secret available" });
+      return;
+    }
+
+    const ok = verifySlackSignature({
+      signingSecret,
+      timestampHeader,
+      signatureHeader,
+      rawBody,
+    });
+    if (!ok) {
+      res.status(401).json({ error: "invalid signature" });
+      return;
+    }
+
+    // Ack fast so Slack's 3s budget is met even with slow DB hops.
+    res.status(200).json({});
+
+    if (!isMessagingInitialized()) return;
+    const adapter = messagingRegistry.get("slack");
+    if (!adapter) return;
+
+    const normalized = adapter.normalizeEvent(body);
+    if (!normalized) return;
+
+    void (async () => {
+      try {
+        const processor = getEventsProcessor();
+        await processor.handle(normalized);
+      } catch (err) {
+        logger.warn({ err, companyId }, "slack events: processor failed");
+      }
+    })();
+  });
+
+  // ---------- Interactivity webhook (Phase 1 stub) ----------
+  router.post(
+    "/interactivity",
+    express.urlencoded({ extended: true }),
+    async (req: Request, res: Response) => {
+      const env = readEnv();
+      const stashedRaw = (req as unknown as { rawBody?: Buffer }).rawBody;
+      const rawBody = stashedRaw ? stashedRaw.toString("utf-8") : "";
+      const timestampHeader = req.header("x-slack-request-timestamp") ?? "";
+      const signatureHeader = req.header("x-slack-signature") ?? "";
+
+      // Interactivity payloads are url-encoded with a JSON "payload" field.
+      const payloadRaw = (req.body as { payload?: string } | undefined)?.payload;
+      let teamId: string | null = null;
+      if (typeof payloadRaw === "string") {
+        try {
+          const parsed = JSON.parse(payloadRaw) as { team?: { id?: string } };
+          if (typeof parsed.team?.id === "string") teamId = parsed.team.id;
+        } catch {
+          // ignore — signature verification below is what matters
+        }
+      }
+
+      let signingSecret: string | null = null;
+      if (teamId) {
+        const [install] = await db
+          .select()
+          .from(messagingWorkspaceInstall)
+          .where(
+            and(
+              eq(messagingWorkspaceInstall.backend, "slack"),
+              eq(messagingWorkspaceInstall.externalWorkspaceRef, teamId),
+            ),
+          )
+          .limit(1);
+        if (install) {
+          signingSecret = await getSigningSecretForCompany(db, install.companyId);
+        }
+      }
+      if (!signingSecret && env?.signingSecret) {
+        signingSecret = env.signingSecret;
+      }
+      if (!signingSecret) {
+        res.status(401).json({ error: "no signing secret available" });
+        return;
+      }
+
+      const ok = verifySlackSignature({
+        signingSecret,
+        timestampHeader,
+        signatureHeader,
+        rawBody,
+      });
+      if (!ok) {
+        res.status(401).json({ error: "invalid signature" });
+        return;
+      }
+
+      // Phase 1: no-op. Approval buttons land in Phase 1.5.
+      res.json({});
+    },
+  );
 
   // Silence unused-import warnings if these become dead on a refactor.
   void companySecrets;
