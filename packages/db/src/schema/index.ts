@@ -66,3 +66,4 @@ export { pluginLogs } from "./plugin_logs.js";
 export { messagingWorkspaceInstall } from "./messaging_workspace_install.js";
 export { messagingChannels } from "./messaging_channels.js";
 export { messagingThreads } from "./messaging_threads.js";
+export { messagingIdentities } from "./messaging_identities.js";
