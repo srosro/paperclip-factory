@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
-import { HttpError } from "../errors.js";
+import { HttpError, translateMessagingError } from "../errors.js";
 import { trackErrorHandlerCrash } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 
@@ -33,11 +33,14 @@ function attachErrorContext(
 }
 
 export function errorHandler(
-  err: unknown,
+  rawErr: unknown,
   req: Request,
   res: Response,
   _next: NextFunction,
 ) {
+  // Translate typed messaging errors into HttpError codes before dispatch so
+  // callers see the documented 412/409/429/503 shapes instead of a generic 500.
+  const err = translateMessagingError(rawErr);
   if (err instanceof HttpError) {
     if (err.status >= 500) {
       attachErrorContext(
