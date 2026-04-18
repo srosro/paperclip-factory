@@ -68,3 +68,5 @@ export { messagingChannels } from "./messaging_channels.js";
 export { messagingThreads } from "./messaging_threads.js";
 export { messagingIdentities } from "./messaging_identities.js";
 export { messagingMessageRefs } from "./messaging_message_refs.js";
+export { messagingEventsInbox } from "./messaging_events_inbox.js";
+export { messagingCompanyConfig } from "./messaging_company_config.js";
