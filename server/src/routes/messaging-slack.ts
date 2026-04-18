@@ -33,6 +33,8 @@ const BOT_SCOPES = [
   "users:read.email",
   "reactions:read",
   "reactions:write",
+  "files:read",
+  "files:write",
 ].join(",");
 
 const USER_SCOPES = [
@@ -43,6 +45,7 @@ const USER_SCOPES = [
   "users:read",
   "users.profile:read",
   "reactions:write",
+  "files:read",
 ].join(",");
 
 const STATE_TTL_SEC = 10 * 60; // 10 minutes
