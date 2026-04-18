@@ -35,7 +35,11 @@ export interface RouterDeps {
 export interface RouterPostArgs {
   companyId: string;
   issueId: string;
-  projectId: string;
+  /**
+   * Project the issue belongs to. When null, the router provisions an
+   * ad-hoc channel keyed on the issueId so comments still have a home.
+   */
+  projectId: string | null;
   authorAgentId?: string;
   authorUserId?: string;
   body: string;
@@ -60,12 +64,13 @@ export interface MessagingRouter {
   backend: BackendKey;
   getOrCreateChannel(args: {
     companyId: string;
-    projectId: string;
+    projectId: string | null;
+    issueId?: string;
   }): Promise<{ id: string; externalRef: string }>;
   getOrCreateThread(args: {
     companyId: string;
     issueId: string;
-    projectId: string;
+    projectId: string | null;
   }): Promise<{ id: string; threadRef: string; channelId: string }>;
   postMessage(args: RouterPostArgs): Promise<{
     id: string;
@@ -79,7 +84,7 @@ export interface MessagingRouter {
   onIssueStateChange(issueId: string): Promise<void>;
   ensureChannelMember(args: {
     companyId: string;
-    projectId: string;
+    projectId: string | null;
     agentId?: string;
     userId?: string;
   }): Promise<void>;
@@ -174,47 +179,82 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
   const router: MessagingRouter = {
     backend: deps.backend,
 
-    async getOrCreateChannel({ companyId, projectId }) {
-      const existing = await deps.db
+    async getOrCreateChannel({ companyId, projectId, issueId }) {
+      if (projectId) {
+        const existing = await deps.db
+          .select()
+          .from(messagingChannels)
+          .where(
+            and(
+              eq(messagingChannels.companyId, companyId),
+              eq(messagingChannels.backend, deps.backend),
+              eq(messagingChannels.projectId, projectId),
+            ),
+          )
+          .limit(1);
+        if (existing[0]) {
+          return { id: existing[0].id, externalRef: existing[0].externalChannelRef };
+        }
+
+        const projectRows = await deps.db
+          .select({ name: projectsTable.name })
+          .from(projectsTable)
+          .where(eq(projectsTable.id, projectId))
+          .limit(1);
+        const project = projectRows[0];
+        if (!project) throw new Error(`project ${projectId} not found`);
+
+        const adapter = await requireAdapter();
+        const nameSource = project.name ?? "proj";
+        const name = normalizeChannelName(prefix + nameSource);
+        const created = await adapter.createChannel({ name, purpose: "project" });
+
+        const [row] = await deps.db
+          .insert(messagingChannels)
+          .values({
+            companyId,
+            backend: deps.backend,
+            purpose: "project",
+            projectId,
+            externalChannelRef: created.externalRef,
+            externalChannelName: created.name,
+          })
+          .returning();
+        return { id: row!.id, externalRef: row!.externalChannelRef };
+      }
+
+      // Ad-hoc channel keyed on issueId for issues without a project.
+      if (!issueId) throw new Error("getOrCreateChannel: need projectId or issueId");
+      const adhocExternalRef = `C_adhoc_${issueId}`;
+      const existingAdhoc = await deps.db
         .select()
         .from(messagingChannels)
         .where(
           and(
-            eq(messagingChannels.companyId, companyId),
             eq(messagingChannels.backend, deps.backend),
-            eq(messagingChannels.projectId, projectId),
+            eq(messagingChannels.externalChannelRef, adhocExternalRef),
           ),
         )
         .limit(1);
-      if (existing[0]) {
-        return { id: existing[0].id, externalRef: existing[0].externalChannelRef };
+      if (existingAdhoc[0]) {
+        return { id: existingAdhoc[0].id, externalRef: existingAdhoc[0].externalChannelRef };
       }
 
-      const projectRows = await deps.db
-        .select({ name: projectsTable.name })
-        .from(projectsTable)
-        .where(eq(projectsTable.id, projectId))
-        .limit(1);
-      const project = projectRows[0];
-      if (!project) throw new Error(`project ${projectId} not found`);
-
       const adapter = await requireAdapter();
-      const nameSource = project.name ?? "proj";
-      const name = normalizeChannelName(prefix + nameSource);
-      const created = await adapter.createChannel({ name, purpose: "project" });
+      const name = normalizeChannelName(`${prefix}issue-${issueId.slice(0, 8)}`);
+      const created = await adapter.createChannel({ name, purpose: "ad_hoc" });
 
-      const [row] = await deps.db
+      const [adhocRow] = await deps.db
         .insert(messagingChannels)
         .values({
           companyId,
           backend: deps.backend,
-          purpose: "project",
-          projectId,
+          purpose: "ad_hoc",
           externalChannelRef: created.externalRef,
           externalChannelName: created.name,
         })
         .returning();
-      return { id: row!.id, externalRef: row!.externalChannelRef };
+      return { id: adhocRow!.id, externalRef: adhocRow!.externalChannelRef };
     },
 
     async getOrCreateThread({ companyId, issueId, projectId }) {
@@ -227,7 +267,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         };
       }
 
-      const channel = await this.getOrCreateChannel({ companyId, projectId });
+      const channel = await this.getOrCreateChannel({ companyId, projectId, issueId });
       const card = await buildIssueCardInput(issueId);
       if (!card) throw new Error(`issue ${issueId} not found`);
 
@@ -267,23 +307,34 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         throw new MessagingThreadLocked(thread.id);
       }
 
-      const identity = await loadIdentity({
-        companyId: args.companyId,
-        agentId: args.authorAgentId,
-        userId: args.authorUserId,
-      });
-      if (!identity || identity.state !== "active") {
-        throw new MessagingIdentityNotActive(identity?.id ?? "none");
-      }
-
       const channel = await loadChannel(thread.channelId);
       if (!channel) throw new Error(`channel for thread ${thread.id} not found`);
 
-      const authorIdentity: AuthorIdentity = {
-        backend: deps.backend,
-        externalUserRef: identity.externalUserRef,
-        credential: buildCredential(identity),
-      };
+      // System-authored posts (no agent/user) skip the identity lookup and
+      // post as a synthetic SYSTEM principal. Required for heartbeat
+      // reconcilers / server-generated status comments.
+      let authorIdentity: AuthorIdentity;
+      if (!args.authorAgentId && !args.authorUserId) {
+        authorIdentity = {
+          backend: deps.backend,
+          externalUserRef: "SYSTEM",
+          credential: { kind: "none" },
+        };
+      } else {
+        const identity = await loadIdentity({
+          companyId: args.companyId,
+          agentId: args.authorAgentId,
+          userId: args.authorUserId,
+        });
+        if (!identity || identity.state !== "active") {
+          throw new MessagingIdentityNotActive(identity?.id ?? "none");
+        }
+        authorIdentity = {
+          backend: deps.backend,
+          externalUserRef: identity.externalUserRef,
+          credential: buildCredential(identity),
+        };
+      }
 
       const adapter = await requireAdapter();
       const posted = await adapter.postMessage({
@@ -400,7 +451,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
     },
 
     async ensureChannelMember({ companyId, projectId, agentId, userId }) {
-      const channel = await this.getOrCreateChannel({ companyId, projectId });
+      const channel = await this.getOrCreateChannel({ companyId, projectId, issueId: undefined });
       const identity = await loadIdentity({ companyId, agentId, userId });
       if (!identity || identity.state !== "active") return;
       const adapter = await requireAdapter();

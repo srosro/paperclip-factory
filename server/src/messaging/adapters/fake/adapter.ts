@@ -42,6 +42,19 @@ export interface FakeAdapter extends MessagingAdapter {
   onLocalEvent(listener: (e: MessagingEvent) => void): void;
   failNextPost(code: string): void;
   clear(): void;
+  /**
+   * Test-only: inject a message into the adapter store without emitting a
+   * new-message event. Used by the test seed helper so router.getThreadMessages
+   * can return bodies alongside ref rows inserted directly by the DB fixture.
+   */
+  seedMessage(args: {
+    ref: string;
+    channelRef: string;
+    threadRef: string;
+    author: string;
+    body: string;
+    createdAt?: Date;
+  }): void;
 }
 
 const capabilities: CapabilityFlags = {
@@ -221,6 +234,18 @@ export function createFakeAdapter(): FakeAdapter {
       messages.clear();
       listeners.length = 0;
       pendingFailure = null;
+    },
+    seedMessage(args) {
+      // Idempotent insert used only by tests.
+      messages.set(args.ref, {
+        ref: args.ref,
+        channelRef: args.channelRef,
+        threadRef: args.threadRef,
+        author: args.author,
+        body: args.body,
+        createdAt: args.createdAt ?? new Date(),
+        reactions: {},
+      });
     },
   };
 }

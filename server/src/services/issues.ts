@@ -2277,9 +2277,6 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (!issue) throw notFound("Issue not found");
-      if (!issue.projectId) {
-        throw unprocessable("Cannot comment on an issue without a project");
-      }
 
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -2290,7 +2287,7 @@ export function issueService(db: Db) {
       const posted = await router.postMessage({
         companyId: issue.companyId,
         issueId,
-        projectId: issue.projectId,
+        projectId: issue.projectId ?? null,
         authorAgentId: actor.agentId,
         authorUserId: actor.userId,
         body: redactedBody,
