@@ -42,6 +42,8 @@ export interface RouterDeps {
   issueUrlBase?: string;
 }
 
+export type AuthorKind = "agent" | "user" | "bot_system";
+
 export interface RouterPostArgs {
   companyId: string;
   issueId: string;
@@ -52,6 +54,14 @@ export interface RouterPostArgs {
   projectId: string | null;
   authorAgentId?: string;
   authorUserId?: string;
+  /**
+   * Explicit principal kind. Defaults to "agent" when authorAgentId is
+   * present, "user" when authorUserId is present, else "bot_system"
+   * (Paperclip-authored: recovery/status comments, thread-locked replies,
+   * other server-generated posts). Slack posts for bot_system authoring
+   * use the workspace bot token.
+   */
+  authorKind?: AuthorKind;
   body: string;
   createdByRunId?: string;
   blocks?: unknown;
@@ -353,15 +363,25 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
       const channel = await loadChannel(thread.channelId);
       if (!channel) throw new Error(`channel for thread ${thread.id} not found`);
 
-      // System-authored posts (no agent/user) skip the identity lookup and
-      // post as a synthetic SYSTEM principal. Required for heartbeat
-      // reconcilers / server-generated status comments.
+      // bot_system posts (no agent/user, or authorKind = 'bot_system')
+      // author as the workspace bot — used for heartbeat recovery,
+      // locked-thread replies, and other server-generated messages. Slack
+      // posts with a bot_token credential so the message attributes to the
+      // Paperclip app, not a fake SYSTEM user.
+      const kind: AuthorKind =
+        args.authorKind ??
+        (args.authorAgentId
+          ? "agent"
+          : args.authorUserId
+            ? "user"
+            : "bot_system");
       let authorIdentity: AuthorIdentity;
-      if (!args.authorAgentId && !args.authorUserId) {
+      if (kind === "bot_system") {
         authorIdentity = {
           backend: deps.backend,
           externalUserRef: "SYSTEM",
-          credential: { kind: "none" },
+          credential:
+            deps.backend === "slack" ? { kind: "bot_token" } : { kind: "none" },
         };
       } else {
         const identity = await loadIdentity({
@@ -453,7 +473,8 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         authorIdentity = {
           backend: deps.backend,
           externalUserRef: "SYSTEM",
-          credential: { kind: "none" },
+          credential:
+            deps.backend === "slack" ? { kind: "bot_token" } : { kind: "none" },
         };
       } else {
         const identity = await loadIdentity({

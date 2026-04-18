@@ -16,7 +16,9 @@ export interface CapabilityFlags {
 }
 
 export type AdapterCredential =
-  | { kind: "bot_token"; secretId: string }
+  // bot_token: the adapter resolves the workspace bot token from its own
+  // deps; secretId is informational only and may be omitted.
+  | { kind: "bot_token"; secretId?: string }
   | { kind: "user_token"; secretId: string }
   | { kind: "none" };
 
