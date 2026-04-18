@@ -8,10 +8,19 @@ export interface MessagingAgentIdentity {
   state: MessagingIdentityState;
 }
 
+export type MessagingReadiness =
+  | "disabled"
+  | "not_installed"
+  | "agent_identities_incomplete"
+  | "ready";
+
 export interface MessagingStatus {
   installed: boolean;
+  readiness: MessagingReadiness;
+  activeBackend: string | null;
   workspaceName: string | null;
   workspaceRef: string | null;
+  workspaceInstallId: string | null;
   agentIdentities: MessagingAgentIdentity[];
 }
 

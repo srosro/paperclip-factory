@@ -121,6 +121,7 @@ export function SettingsMessaging() {
 
   const status = statusQuery.data;
   const installed = status?.installed ?? false;
+  const readiness = status?.readiness ?? "disabled";
   const prefs = prefsQuery.data;
 
   function handleConnectWorkspace() {
@@ -161,16 +162,22 @@ export function SettingsMessaging() {
                     Connected to {status?.workspaceName ?? "Slack workspace"}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Paperclip will post issue threads and inbox DMs in this workspace.
+                    {readiness === "agent_identities_incomplete"
+                      ? "Workspace connected, but one or more agents still need to link their Slack identity."
+                      : readiness === "ready"
+                      ? "Paperclip will post issue threads and inbox DMs in this workspace."
+                      : "Paperclip will post issue threads and inbox DMs in this workspace."}
                   </div>
                 </div>
               </div>
-              {stateBadge("active")}
+              {stateBadge(readiness === "ready" ? "active" : "pending_auth")}
             </div>
           ) : (
             <div className="space-y-3">
               <p className="text-sm text-muted-foreground">
-                Connect a Slack workspace to route issue threads and per-user inbox DMs through Slack.
+                {readiness === "disabled"
+                  ? "Messaging is disabled for this company. Connect a Slack workspace to enable it."
+                  : "Connect a Slack workspace to route issue threads and per-user inbox DMs through Slack."}
               </p>
               <Button
                 size="sm"
