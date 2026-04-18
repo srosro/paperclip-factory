@@ -1785,6 +1785,14 @@ export function issueService(db: Db) {
           void getMessagingRouter().onIssueStateChange(result.id);
         }
 
+        // Soft-lock the messaging thread when an issue reaches a terminal
+        // state, unlock when it re-opens. Fire-and-forget — lock failures
+        // shouldn't block the status update.
+        if (issueData.status !== undefined && issueData.status !== existing.status) {
+          const terminal = result.status === "done" || result.status === "cancelled";
+          void getMessagingRouter().setThreadLocked(result.id, terminal);
+        }
+
         // Fire inbox DMs for assignment / status change on the assignee user.
         // Every hook is fire-and-forget inside dispatchInbox* helpers.
         const assigneeChanged =

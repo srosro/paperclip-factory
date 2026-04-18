@@ -108,6 +108,13 @@ export interface MessagingRouter {
     afterRefId?: string;
   }): Promise<RouterReadMessage[]>;
   onIssueStateChange(issueId: string): Promise<void>;
+  /**
+   * Update the messaging thread's locked state for an issue. When an issue
+   * transitions to `done` / `cancelled`, callers flip this to true so that
+   * further comments are rejected by postMessage and dropped by the events
+   * processor. Re-opening an issue flips it back to false.
+   */
+  setThreadLocked(issueId: string, locked: boolean): Promise<void>;
   ensureChannelMember(args: {
     companyId: string;
     projectId: string | null;
@@ -528,6 +535,28 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
           deletedAt: r.deletedAt,
           suppressedForWake: r.suppressedForWake,
         }));
+    },
+
+    async setThreadLocked(issueId: string, locked: boolean) {
+      const thread = await loadThread(issueId);
+      if (!thread) return;
+      const nextState = locked ? "locked" : "open";
+      if (thread.state === nextState) return;
+      await deps.db
+        .update(messagingThreads)
+        .set({ state: nextState, updatedAt: new Date() })
+        .where(eq(messagingThreads.id, thread.id));
+      // Adapter-side lockThread is a best-effort (Slack has no native lock;
+      // FakeAdapter flips an internal flag). Errors are logged and swallowed.
+      if (locked) {
+        try {
+          const adapter = await requireAdapter();
+          await adapter.lockThread(thread.externalThreadRef);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(`messaging: adapter.lockThread failed for ${issueId}`, err);
+        }
+      }
     },
 
     async onIssueStateChange(issueId) {
