@@ -45,12 +45,13 @@ export async function toExternalMentions(
 export interface InternalMentionResult {
   rewritten: string;
   mentionedAgentIds: string[];
+  mentionedUserIds: string[];
 }
 
 /**
  * Inbound: Slack payload carries `<@U…>` references. Rewrite to Paperclip's
  * `@name` form for index/UI storage, and return the resolved Paperclip agent
- * ids for wake dispatch.
+ * ids for wake dispatch + user ids for inbox dispatch.
  */
 export async function toInternalMentions(
   db: Db,
@@ -59,12 +60,15 @@ export async function toInternalMentions(
   const refs = Array.from(body.matchAll(SLACK_MENTION_RE), (m) => m[1]).filter(
     (r): r is string => typeof r === "string" && r.length > 0,
   );
-  if (refs.length === 0) return { rewritten: body, mentionedAgentIds: [] };
+  if (refs.length === 0) {
+    return { rewritten: body, mentionedAgentIds: [], mentionedUserIds: [] };
+  }
 
   const rows = await db
     .select({
       externalRef: messagingIdentities.externalUserRef,
       agentId: messagingIdentities.agentId,
+      userId: messagingIdentities.userId,
       agentName: agents.name,
     })
     .from(messagingIdentities)
@@ -85,20 +89,26 @@ export async function toInternalMentions(
   const mentionedAgentIds = rows
     .map((r) => r.agentId)
     .filter((id): id is string => typeof id === "string" && id.length > 0);
-  return { rewritten, mentionedAgentIds };
+  const mentionedUserIds = rows
+    .map((r) => r.userId)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  return { rewritten, mentionedAgentIds, mentionedUserIds };
 }
 
 /**
  * Convenience used by the events module: pass raw body, get back the agent
- * ids mentioned. Always backend=slack; the router-agnostic form is
+ * ids + user ids mentioned. Always backend=slack; the router-agnostic form is
  * `resolveMentions(rawBody)` in `EventsDeps`.
  */
 export async function resolveSlackMentions(
   db: Db,
   rawBody: string,
-): Promise<string[]> {
-  const { mentionedAgentIds } = await toInternalMentions(db, rawBody);
-  return mentionedAgentIds;
+): Promise<{ agentIds: string[]; userIds: string[] }> {
+  const { mentionedAgentIds, mentionedUserIds } = await toInternalMentions(
+    db,
+    rawBody,
+  );
+  return { agentIds: mentionedAgentIds, userIds: mentionedUserIds };
 }
 
 /**

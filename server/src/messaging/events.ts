@@ -30,14 +30,18 @@ export interface EventsDeps {
     issueId: string;
     authorAgentId: string | null;
     authorUserId: string | null;
+    authorExternalRef: string;
     mentionedAgentIds: string[];
+    mentionedUserIds: string[];
   }) => Promise<void>;
   /**
    * Optional mention resolver — adapters that can pre-parse mentions from
    * raw body should expose this. Events module passes in the raw body and
-   * expects a list of Paperclip agent ids.
+   * expects lists of Paperclip agent ids + user ids (for inbox dispatch).
    */
-  resolveMentions?: (rawBody: string) => Promise<string[]>;
+  resolveMentions?: (
+    rawBody: string,
+  ) => Promise<{ agentIds: string[]; userIds: string[] }>;
   /**
    * Optional: backend-specific file ingest. Called for each inbound message
    * that carries files. The implementation must download bytes (using a user
@@ -159,9 +163,9 @@ async function handleNewMessage(
 
   if (!deps.onMessageCreated) return;
 
-  const mentionedAgentIds = deps.resolveMentions
+  const resolved = deps.resolveMentions
     ? await deps.resolveMentions(event.bodyRaw)
-    : [];
+    : { agentIds: [], userIds: [] };
 
   await deps.onMessageCreated({
     refId: row.id,
@@ -169,7 +173,9 @@ async function handleNewMessage(
     issueId: thread.issueId,
     authorAgentId: row.authorAgentId,
     authorUserId: row.authorUserId,
-    mentionedAgentIds,
+    authorExternalRef: event.authorExternalRef,
+    mentionedAgentIds: resolved.agentIds,
+    mentionedUserIds: resolved.userIds,
   });
 }
 

@@ -46,9 +46,13 @@ export interface InitMessagingArgs {
     issueId: string;
     authorAgentId: string | null;
     authorUserId: string | null;
+    authorExternalRef: string;
     mentionedAgentIds: string[];
+    mentionedUserIds: string[];
   }) => Promise<void>;
-  resolveMentions?: (rawBody: string) => Promise<string[]>;
+  resolveMentions?: (
+    rawBody: string,
+  ) => Promise<{ agentIds: string[]; userIds: string[] }>;
   issueUrlBase?: string;
   /**
    * Slack adapter token resolvers. When provided, a SlackAdapter is

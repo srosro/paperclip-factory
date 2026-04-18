@@ -20,6 +20,7 @@ import {
 } from "../messaging/adapters/slack/token-store.js";
 import { messagingRegistry } from "../messaging/registry.js";
 import { getEventsProcessor, isMessagingInitialized } from "../messaging/index.js";
+import { autoDiscoverInboxIdentities } from "../messaging/inbox.js";
 import { logger } from "../middleware/logger.js";
 
 const BOT_SCOPES = [
@@ -268,6 +269,25 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
           req.actor.type === "board" ? req.actor.userId ?? null : null,
         state: "active",
       });
+    }
+
+    // Auto-discover inbox identities: match Slack workspace users by email
+    // to Paperclip auth users and insert identity rows so per-human DMs can
+    // start flowing without each user having to complete user-scope OAuth.
+    try {
+      const result = await autoDiscoverInboxIdentities(db, {
+        companyId,
+        botToken: exch.access_token,
+      });
+      logger.info(
+        { companyId, ...result },
+        "slack inbox auto-discovery completed",
+      );
+    } catch (err) {
+      logger.warn(
+        { err, companyId },
+        "slack inbox auto-discovery failed; bot install still succeeded",
+      );
     }
 
     // Redirect back into the UI.
