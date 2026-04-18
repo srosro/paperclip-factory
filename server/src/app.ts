@@ -52,6 +52,7 @@ import { pluginRegistryService } from "./services/plugin-registry.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
+import { initMessaging } from "./messaging/index.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -125,6 +126,11 @@ export async function createApp(
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
   },
 ) {
+  // Initialize messaging router + events before any routes are mounted.
+  // Defaults to the FakeAdapter backend; Slack/etc. will be configured per
+  // company in a later phase.
+  initMessaging({ db });
+
   const app = express();
 
   app.use(express.json({
