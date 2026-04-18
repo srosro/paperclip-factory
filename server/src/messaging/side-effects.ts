@@ -148,7 +148,7 @@ export async function handleMessageCreatedSideEffects(
   void deps.db
     .update(messagingMessageRefs)
     .set({
-      metadata: sql`COALESCE(${messagingMessageRefs.metadata}, '{}'::jsonb) || jsonb_build_object('sideEffectsDispatchedAt', ${new Date().toISOString()})`,
+      metadata: sql`COALESCE(${messagingMessageRefs.metadata}, '{}'::jsonb) || jsonb_build_object('sideEffectsDispatchedAt', ${new Date().toISOString()}::text)`,
     })
     .where(
       and(

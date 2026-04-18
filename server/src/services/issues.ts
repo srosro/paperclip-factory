@@ -2313,7 +2313,7 @@ export function issueService(db: Db) {
           .update(messagingMessageRefs)
           .set({
             suppressedForWake: true,
-            metadata: sql`COALESCE(${messagingMessageRefs.metadata}, '{}'::jsonb) || jsonb_build_object('cancelledAt', ${new Date().toISOString()})`,
+            metadata: sql`COALESCE(${messagingMessageRefs.metadata}, '{}'::jsonb) || jsonb_build_object('cancelledAt', ${new Date().toISOString()}::text)`,
           })
           .where(eq(messagingMessageRefs.id, commentId));
         await tx
