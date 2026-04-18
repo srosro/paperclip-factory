@@ -130,20 +130,20 @@ export async function createApp(
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
   },
 ) {
-  // Initialize messaging router + events before any routes are mounted.
-  // Defaults to the FakeAdapter backend. Slack env configures a SlackAdapter
-  // too, and (when a workspace install exists) the default backend switches
-  // to "slack".
-  const slackBackendConfigured = Boolean(
+  // Bootstrap messaging: register shared deps. Backend selection is per
+  // company, resolved from messaging_company_config + messaging_workspace_install
+  // on each request (see server/src/messaging/context.ts). Presence of Slack
+  // env vars is a prerequisite for Slack to work at all; it does not force any
+  // company onto Slack by itself.
+  const slackEnvConfigured = Boolean(
     process.env.SLACK_APP_CLIENT_ID &&
       process.env.SLACK_APP_CLIENT_SECRET &&
       process.env.SLACK_SIGNING_SECRET,
   );
-  await initMessaging({
+  initMessaging({
     db,
-    backend: slackBackendConfigured ? "slack" : "fake",
     storage: opts.storageService,
-    slack: slackBackendConfigured
+    slack: slackEnvConfigured
       ? defaultSlackResolvers(db, opts.storageService)
       : undefined,
     onMessageCreated: async ({ companyId, issueId, refId, authorExternalRef, mentionedUserIds }) => {

@@ -19,7 +19,7 @@ import {
   projects,
   projectWorkspaces,
 } from "@paperclipai/db";
-import { getMessagingRouter, isMessagingInitialized } from "../messaging/index.js";
+import { resolveMessagingContext } from "../messaging/index.js";
 import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
@@ -190,9 +190,11 @@ async function resolveRunScopedMentionedSkillKeys(input: {
   // Bodies live in the messaging backend (FakeAdapter / Slack), not in the
   // db. Fetch them via the router when available.
   const issueId = input.issueId;
-  const commentBodies = isMessagingInitialized()
-    ? (await getMessagingRouter().getThreadMessages({ issueId })).map((m) => m.body)
-    : [];
+  const ctxForSkills = await resolveMessagingContext(input.companyId);
+  const commentBodies =
+    ctxForSkills.status === "ready"
+      ? (await ctxForSkills.router.getThreadMessages({ issueId })).map((m) => m.body)
+      : [];
   const mentionedSkillIds = extractMentionedSkillIdsFromSources([
     issue.title,
     issue.description ?? "",
@@ -1265,13 +1267,15 @@ async function buildPaperclipWakePayload(input: {
           );
 
   const bodyByIssue = new Map<string, Map<string, string>>();
-  if (commentRefs.length > 0 && isMessagingInitialized()) {
-    const uniqueIssueIds = [...new Set(commentRefs.map((r) => r.issueId))];
-    const router = getMessagingRouter();
-    for (const issueIdForBody of uniqueIssueIds) {
-      const msgs = await router.getThreadMessages({ issueId: issueIdForBody });
-      const byRef = new Map(msgs.map((m) => [m.refId, m.body]));
-      bodyByIssue.set(issueIdForBody, byRef);
+  if (commentRefs.length > 0) {
+    const bodyCtx = await resolveMessagingContext(input.companyId);
+    if (bodyCtx.status === "ready") {
+      const uniqueIssueIds = [...new Set(commentRefs.map((r) => r.issueId))];
+      for (const issueIdForBody of uniqueIssueIds) {
+        const msgs = await bodyCtx.router.getThreadMessages({ issueId: issueIdForBody });
+        const byRef = new Map(msgs.map((m) => [m.refId, m.body]));
+        bodyByIssue.set(issueIdForBody, byRef);
+      }
     }
   }
 

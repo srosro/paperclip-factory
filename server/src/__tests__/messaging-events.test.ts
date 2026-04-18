@@ -14,7 +14,6 @@ import {
   messagingEventsInbox,
 } from "@paperclipai/db";
 import { createFakeAdapter } from "../messaging/adapters/fake/adapter.js";
-import { createMessagingRegistry } from "../messaging/registry.js";
 import { createMessagingRouter } from "../messaging/router.js";
 import { createEventsProcessor } from "../messaging/events.js";
 import type { MessagingEvent } from "../messaging/types.js";
@@ -92,9 +91,7 @@ describeIf("messaging events processor", () => {
   it("dedups duplicate externalEventId", async () => {
     const s = await seedFull(db);
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
     const onCreated = vi.fn().mockResolvedValue(undefined);
     const events = createEventsProcessor({ db, backend: "fake", onMessageCreated: onCreated });
 
@@ -134,9 +131,7 @@ describeIf("messaging events processor", () => {
   it("handleEdit bumps editedAt and editCount", async () => {
     const s = await seedFull(db);
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     // Wire events to the adapter's local echo so postMessage causes a real event
     const events = createEventsProcessor({ db, backend: "fake" });
@@ -173,9 +168,7 @@ describeIf("messaging events processor", () => {
   it("handleDelete sets deletedAt", async () => {
     const s = await seedFull(db);
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
     const events = createEventsProcessor({ db, backend: "fake" });
     adapter.onLocalEvent((e) => void events.handle(e));
 
@@ -205,9 +198,7 @@ describeIf("messaging events processor", () => {
   it("reactions are tracked per emoji per reactor", async () => {
     const s = await seedFull(db);
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
     const events = createEventsProcessor({ db, backend: "fake" });
     adapter.onLocalEvent((e) => void events.handle(e));
 
@@ -239,9 +230,7 @@ describeIf("messaging events processor", () => {
   it("respects suppressedForWake by not calling onMessageCreated", async () => {
     const s = await seedFull(db);
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
     const thread = await router.getOrCreateThread({
       companyId: s.companyId,
       issueId: s.issueId,

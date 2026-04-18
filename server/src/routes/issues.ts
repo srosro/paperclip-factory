@@ -66,8 +66,7 @@ import {
   parseIssueExecutionState,
 } from "../services/issue-execution-policy.js";
 import {
-  getMessagingRouter,
-  isMessagingInitialized,
+  resolveMessagingContext,
 } from "../messaging/index.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
@@ -2712,21 +2711,24 @@ export function issueRoutes(
     // configured backend supports file upload, ship the bytes to the same
     // thread so the file renders in-line. Best effort: surface but don't
     // fail the HTTP request on Slack errors.
-    if (parsedMeta.data.issueCommentId && isMessagingInitialized()) {
-      try {
-        await getMessagingRouter().uploadAttachmentToMessage({
-          refId: parsedMeta.data.issueCommentId,
-          authorAgentId: actor.agentId ?? undefined,
-          authorUserId: actor.actorType === "user" ? actor.actorId : undefined,
-          filename: attachment.originalFilename ?? `attachment-${attachment.id}`,
-          contentType: attachment.contentType,
-          body: file.buffer,
-        });
-      } catch (err) {
-        logger.warn(
-          { err, issueId, attachmentId: attachment.id },
-          "messaging: upload attachment to backend thread failed",
-        );
+    if (parsedMeta.data.issueCommentId) {
+      const msgCtx = await resolveMessagingContext(companyId);
+      if (msgCtx.status === "ready") {
+        try {
+          await msgCtx.router.uploadAttachmentToMessage({
+            refId: parsedMeta.data.issueCommentId,
+            authorAgentId: actor.agentId ?? undefined,
+            authorUserId: actor.actorType === "user" ? actor.actorId : undefined,
+            filename: attachment.originalFilename ?? `attachment-${attachment.id}`,
+            contentType: attachment.contentType,
+            body: file.buffer,
+          });
+        } catch (err) {
+          logger.warn(
+            { err, issueId, attachmentId: attachment.id },
+            "messaging: upload attachment to backend thread failed",
+          );
+        }
       }
     }
 

@@ -15,6 +15,7 @@ import {
   messagingIdentities,
   messagingMessageRefs,
   messagingThreads,
+  messagingCompanyConfig,
   messagingWorkspaceInstall,
   projects,
 } from "@paperclipai/db";
@@ -135,6 +136,10 @@ async function seedWorkspaceAndThread(
     signingSecretId: signingSecret!.id,
     state: "active",
   });
+  await db.insert(messagingCompanyConfig).values({
+    companyId,
+    activeBackend: "slack",
+  });
 
   const channelExternalRef = "C_SLACK_TEST";
   const [channel] = await db
@@ -192,15 +197,9 @@ describeIf("messaging slack events webhook", () => {
     } catch {
       // no-op
     }
-    try {
-      messagingRegistry.unregister("slack");
-    } catch {
-      // no-op
-    }
     resetMessagingForTests();
-    await initMessaging({
+    initMessaging({
       db,
-      backend: "slack",
       slack: {
         getBotToken: async () => "xoxb-FAKE",
         getUserToken: async () => "xoxp-FAKE",
@@ -214,6 +213,7 @@ describeIf("messaging slack events webhook", () => {
     await db.delete(messagingThreads);
     await db.delete(messagingChannels);
     await db.delete(messagingIdentities);
+    await db.delete(messagingCompanyConfig);
     await db.delete(messagingWorkspaceInstall);
     await db.delete(companySecretVersions);
     await db.delete(companySecrets);

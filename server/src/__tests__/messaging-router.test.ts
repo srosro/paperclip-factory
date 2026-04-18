@@ -14,7 +14,6 @@ import {
   messagingMessageRefs,
 } from "@paperclipai/db";
 import { createFakeAdapter } from "../messaging/adapters/fake/adapter.js";
-import { createMessagingRegistry } from "../messaging/registry.js";
 import { createMessagingRouter } from "../messaging/router.js";
 import { MessagingIdentityNotActive } from "../messaging/types.js";
 import {
@@ -97,9 +96,7 @@ describeIf("messaging router", () => {
   it("getOrCreateChannel is idempotent and slugs project names", async () => {
     const s = await seed(db);
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     const a = await router.getOrCreateChannel({ companyId: s.companyId, projectId: s.projectId });
     const b = await router.getOrCreateChannel({ companyId: s.companyId, projectId: s.projectId });
@@ -116,9 +113,7 @@ describeIf("messaging router", () => {
   it("getOrCreateThread posts an issue card once per issue", async () => {
     const s = await seed(db);
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     const a = await router.getOrCreateThread({
       companyId: s.companyId,
@@ -150,9 +145,7 @@ describeIf("messaging router", () => {
     });
 
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     const [run] = await db
       .insert(heartbeatRuns)
@@ -179,9 +172,7 @@ describeIf("messaging router", () => {
   it("postMessage throws MessagingIdentityNotActive when identity is missing", async () => {
     const s = await seed(db);
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     await expect(
       router.postMessage({
@@ -205,9 +196,7 @@ describeIf("messaging router", () => {
     });
 
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     const postArgs = {
       companyId: s.companyId,
@@ -226,9 +215,7 @@ describeIf("messaging router", () => {
   it("onIssueStateChange edits the thread parent message", async () => {
     const s = await seed(db);
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     const thread = await router.getOrCreateThread({
       companyId: s.companyId,
@@ -270,9 +257,7 @@ describeIf("messaging router", () => {
     });
 
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     await router.ensureChannelMember({
       companyId: s.companyId,

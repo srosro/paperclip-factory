@@ -561,7 +561,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("re-enqueues assigned todo work when the last issue run died and no wake remains", async () => {
-    const { agentId, issueId, runId } = await seedStrandedIssueFixture({
+    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "todo",
       runStatus: "failed",
     });
@@ -588,7 +588,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("blocks assigned todo work after the one automatic dispatch recovery was already used", async () => {
-    const { issueId } = await seedStrandedIssueFixture({
+    const { companyId, issueId } = await seedStrandedIssueFixture({
       status: "todo",
       runStatus: "failed",
       retryReason: "assignment_recovery",
@@ -612,8 +612,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     // Body lives in the messaging backend; fetch via the router-equivalent
     // path exposed on the test helper rather than via SQL.
     const bodies = await (async () => {
-      const { getMessagingRouter } = await import("../messaging/index.js");
-      const msgs = await getMessagingRouter().getThreadMessages({ issueId });
+      const { requireMessagingContext } = await import("../messaging/index.js");
+      const ctx = await requireMessagingContext(companyId);
+      const msgs = await ctx.router.getThreadMessages({ issueId });
       return msgs.map((m) => m.body);
     })();
     expect(bodies.join("\n")).toContain("retried dispatch");
@@ -621,7 +622,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("re-enqueues continuation for stranded in-progress work with no active run", async () => {
-    const { agentId, issueId, runId } = await seedStrandedIssueFixture({
+    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "failed",
     });
@@ -648,7 +649,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("blocks stranded in-progress work after the continuation retry was already used", async () => {
-    const { issueId } = await seedStrandedIssueFixture({
+    const { companyId, issueId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "failed",
       retryReason: "issue_continuation_needed",
@@ -670,8 +671,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(eq(messagingThreads.issueId, issueId));
     expect(commentRefs).toHaveLength(1);
     const bodies = await (async () => {
-      const { getMessagingRouter } = await import("../messaging/index.js");
-      const msgs = await getMessagingRouter().getThreadMessages({ issueId });
+      const { requireMessagingContext } = await import("../messaging/index.js");
+      const ctx = await requireMessagingContext(companyId);
+      const msgs = await ctx.router.getThreadMessages({ issueId });
       return msgs.map((m) => m.body);
     })();
     expect(bodies.join("\n")).toContain("retried continuation");

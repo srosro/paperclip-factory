@@ -23,7 +23,10 @@ import {
   projectWorkspaces,
   projects,
 } from "@paperclipai/db";
-import { getMessagingRouter, isMessagingInitialized } from "../messaging/index.js";
+import {
+  resolveMessagingContext,
+  requireMessagingContext,
+} from "../messaging/index.js";
 import {
   dispatchInboxForAssignment,
   dispatchInboxForStatusChange,
@@ -1773,28 +1776,32 @@ export function issueService(db: Db) {
 
       // Push the updated issue card (title/status/assignee/etc.) to the
       // messaging backend so the thread header stays in sync. Best-effort;
-      // failures are logged inside the router.
-      if (result && isMessagingInitialized()) {
-        const touched =
-          issueData.status !== undefined ||
-          issueData.title !== undefined ||
-          issueData.assigneeAgentId !== undefined ||
-          issueData.assigneeUserId !== undefined ||
-          issueData.priority !== undefined;
-        if (touched) {
-          void getMessagingRouter().onIssueStateChange(result.id);
-        }
+      // failures are logged inside the router. Skip when the company has no
+      // active messaging backend.
+      if (result) {
+        const ctx = await resolveMessagingContext(result.companyId);
+        if (ctx.status === "ready") {
+          const touched =
+            issueData.status !== undefined ||
+            issueData.title !== undefined ||
+            issueData.assigneeAgentId !== undefined ||
+            issueData.assigneeUserId !== undefined ||
+            issueData.priority !== undefined;
+          if (touched) {
+            void ctx.router.onIssueStateChange(result.id);
+          }
 
-        // Soft-lock the messaging thread when an issue reaches a terminal
-        // state, unlock when it re-opens. Fire-and-forget — lock failures
-        // shouldn't block the status update.
-        if (issueData.status !== undefined && issueData.status !== existing.status) {
-          const terminal = result.status === "done" || result.status === "cancelled";
-          void getMessagingRouter().setThreadLocked(result.id, terminal);
+          // Soft-lock the messaging thread when an issue reaches a terminal
+          // state, unlock when it re-opens. Fire-and-forget — lock failures
+          // shouldn't block the status update.
+          if (issueData.status !== undefined && issueData.status !== existing.status) {
+            const terminal = result.status === "done" || result.status === "cancelled";
+            void ctx.router.setThreadLocked(result.id, terminal);
+          }
         }
 
         // Fire inbox DMs for assignment / status change on the assignee user.
-        // Every hook is fire-and-forget inside dispatchInbox* helpers.
+        // dispatchInbox* helpers self-gate on identity resolution.
         const assigneeChanged =
           issueData.assigneeUserId !== undefined &&
           issueData.assigneeUserId !== existing.assigneeUserId;
@@ -2174,9 +2181,9 @@ export function issueService(db: Db) {
 
       // Router returns all non-deleted messages chronologically ascending,
       // merging ref rows with live adapter bodies.
-      if (!isMessagingInitialized()) return [];
-      const router = getMessagingRouter();
-      const messages = await router.getThreadMessages({ issueId });
+      const ctx = await resolveMessagingContext(issue.companyId);
+      if (ctx.status !== "ready") return [];
+      const messages = await ctx.router.getThreadMessages({ issueId });
 
       let filtered = messages;
       if (afterCommentId) {
@@ -2202,10 +2209,19 @@ export function issueService(db: Db) {
     },
 
     getCommentCursor: async (issueId: string) => {
-      if (!isMessagingInitialized()) {
+      const [issue] = await db
+        .select({ companyId: issues.companyId })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .limit(1);
+      if (!issue) {
         return { totalComments: 0, latestCommentId: null, latestCommentAt: null };
       }
-      const messages = await getMessagingRouter().getThreadMessages({ issueId });
+      const ctx = await resolveMessagingContext(issue.companyId);
+      if (ctx.status !== "ready") {
+        return { totalComments: 0, latestCommentId: null, latestCommentAt: null };
+      }
+      const messages = await ctx.router.getThreadMessages({ issueId });
       if (messages.length === 0) {
         return { totalComments: 0, latestCommentId: null, latestCommentAt: null };
       }
@@ -2237,8 +2253,9 @@ export function issueService(db: Db) {
       if (!refRow) return null;
 
       let body = "";
-      if (isMessagingInitialized()) {
-        const msgs = await getMessagingRouter().getThreadMessages({ issueId: refRow.issueId });
+      const readCtx = await resolveMessagingContext(refRow.companyId);
+      if (readCtx.status === "ready") {
+        const msgs = await readCtx.router.getThreadMessages({ issueId: refRow.issueId });
         body = msgs.find((m) => m.refId === refRow.id)?.body ?? "";
       }
       const { censorUsernameInLogs } = await instanceSettings.getGeneral();
@@ -2280,8 +2297,9 @@ export function issueService(db: Db) {
       if (!refRow) return null;
 
       let body = "";
-      if (isMessagingInitialized()) {
-        const msgs = await getMessagingRouter().getThreadMessages({ issueId: refRow.issueId });
+      const rmCtx = await resolveMessagingContext(refRow.companyId);
+      if (rmCtx.status === "ready") {
+        const msgs = await rmCtx.router.getThreadMessages({ issueId: refRow.issueId });
         body = msgs.find((m) => m.refId === refRow.id)?.body ?? "";
       }
 
@@ -2329,8 +2347,8 @@ export function issueService(db: Db) {
       };
       const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
 
-      const router = getMessagingRouter();
-      const posted = await router.postMessage({
+      const ctx = await requireMessagingContext(issue.companyId);
+      const posted = await ctx.router.postMessage({
         companyId: issue.companyId,
         issueId,
         projectId: issue.projectId ?? null,
@@ -2569,11 +2587,14 @@ export function issueService(db: Db) {
         }
       }
 
-      if (opts?.includeCommentBodies !== false && isMessagingInitialized()) {
-        const messages = await getMessagingRouter().getThreadMessages({ issueId });
-        for (const message of messages) {
-          for (const projectId of extractProjectMentionIds(message.body)) {
-            mentionedIds.add(projectId);
+      if (opts?.includeCommentBodies !== false) {
+        const ctx = await resolveMessagingContext(issue.companyId);
+        if (ctx.status === "ready") {
+          const messages = await ctx.router.getThreadMessages({ issueId });
+          for (const message of messages) {
+            for (const projectId of extractProjectMentionIds(message.body)) {
+              mentionedIds.add(projectId);
+            }
           }
         }
       }

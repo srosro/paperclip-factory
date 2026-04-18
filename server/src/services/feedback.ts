@@ -19,7 +19,7 @@ import {
   messagingMessageRefs,
   messagingThreads,
 } from "@paperclipai/db";
-import { getMessagingRouter, isMessagingInitialized } from "../messaging/index.js";
+import { resolveMessagingContext } from "../messaging/index.js";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { claudeConfigDir, parseClaudeStreamJson } from "@paperclipai/adapter-claude-local/server";
 import { codexHomeDir, parseCodexJsonl } from "@paperclipai/adapter-codex-local/server";
@@ -820,8 +820,9 @@ async function resolveFeedbackTarget(
 
     // Bodies live in the messaging backend, not in the db.
     let body = "";
-    if (isMessagingInitialized()) {
-      const messages = await getMessagingRouter().getThreadMessages({ issueId: issue.id });
+    const ctx = await resolveMessagingContext(issue.companyId);
+    if (ctx.status === "ready") {
+      const messages = await ctx.router.getThreadMessages({ issueId: issue.id });
       body = messages.find((m) => m.refId === targetRef.id)?.body ?? "";
     }
 
@@ -926,8 +927,9 @@ async function listIssueContextItems(
   // commentRows source: messaging_message_refs joined via messaging_threads.
   // Bodies are fetched from the router and mapped by refId.
   const commentBodyByRef = new Map<string, string>();
-  if (isMessagingInitialized()) {
-    const msgs = await getMessagingRouter().getThreadMessages({ issueId: issue.id });
+  const ctx = await resolveMessagingContext(issue.companyId);
+  if (ctx.status === "ready") {
+    const msgs = await ctx.router.getThreadMessages({ issueId: issue.id });
     for (const m of msgs) commentBodyByRef.set(m.refId, m.body);
   }
   const [commentRefs, revisionRows] = await Promise.all([

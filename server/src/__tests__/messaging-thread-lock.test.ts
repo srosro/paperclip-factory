@@ -14,7 +14,6 @@ import {
   messagingMessageRefs,
 } from "@paperclipai/db";
 import { createFakeAdapter } from "../messaging/adapters/fake/adapter.js";
-import { createMessagingRegistry } from "../messaging/registry.js";
 import { createMessagingRouter } from "../messaging/router.js";
 import { MessagingThreadLocked } from "../messaging/types.js";
 import {
@@ -91,9 +90,7 @@ describeIf("messaging thread lock", () => {
   it("setThreadLocked flips messaging_threads.state and blocks postMessage", async () => {
     const s = await seed();
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     await router.postMessage({
       companyId: s.companyId,
@@ -125,9 +122,7 @@ describeIf("messaging thread lock", () => {
   it("unlock restores posting", async () => {
     const s = await seed();
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     await router.postMessage({
       companyId: s.companyId,
@@ -158,9 +153,7 @@ describeIf("messaging thread lock", () => {
   it("setThreadLocked is a no-op when no thread exists yet", async () => {
     const s = await seed();
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     await expect(router.setThreadLocked(s.issueId, true)).resolves.toBeUndefined();
   });

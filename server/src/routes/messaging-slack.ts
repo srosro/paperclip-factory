@@ -18,8 +18,10 @@ import {
   storeUserToken,
   getSigningSecretForCompany,
 } from "../messaging/adapters/slack/token-store.js";
-import { messagingRegistry } from "../messaging/registry.js";
-import { getEventsProcessor, isMessagingInitialized } from "../messaging/index.js";
+import {
+  isMessagingInitialized,
+  resolveMessagingContext,
+} from "../messaging/index.js";
 import { autoDiscoverInboxIdentities } from "../messaging/inbox.js";
 import { logger } from "../middleware/logger.js";
 
@@ -496,17 +498,16 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
     // Ack fast so Slack's 3s budget is met even with slow DB hops.
     res.status(200).json({});
 
-    if (!isMessagingInitialized()) return;
-    const adapter = messagingRegistry.get("slack");
-    if (!adapter) return;
+    if (!isMessagingInitialized() || !companyId) return;
+    const ctx = await resolveMessagingContext(companyId);
+    if (ctx.status !== "ready" || ctx.backend !== "slack") return;
 
-    const normalized = adapter.normalizeEvent(body);
+    const normalized = ctx.adapter.normalizeEvent(body);
     if (!normalized) return;
 
     void (async () => {
       try {
-        const processor = getEventsProcessor();
-        await processor.handle(normalized);
+        await ctx.events.handle(normalized);
       } catch (err) {
         logger.warn({ err, companyId }, "slack events: processor failed");
       }

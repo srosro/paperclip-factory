@@ -9,9 +9,9 @@ import {
   type Db as SchemaDb,
 } from "@paperclipai/db";
 import {
-  getMessagingRouter,
   initMessaging,
-  messagingRegistry,
+  invalidateMessagingContext,
+  requireMessagingContext,
   resetMessagingForTests,
 } from "../../messaging/index.js";
 
@@ -32,15 +32,17 @@ async function ensureAuthUser(db: Db, userId: string): Promise<void> {
 }
 
 // Re-initialize messaging for each test run with a fresh FakeAdapter echo.
+// testFallbackBackend: 'fake' makes per-company resolution fall through to
+// the FakeAdapter when no messaging_company_config row exists, matching the
+// pre-hardening test semantics.
 export async function ensureTestMessaging(db: Db): Promise<void> {
-  // Force a fresh adapter so per-test state does not leak across suites.
-  try {
-    messagingRegistry.unregister("fake");
-  } catch {
-    // no-op
-  }
   resetMessagingForTests();
-  await initMessaging({ db });
+  initMessaging({ db, testFallbackBackend: "fake" });
+}
+
+/** Reset the per-company context cache so tests that re-seed get fresh state. */
+export function resetTestMessagingCache(companyId: string): void {
+  invalidateMessagingContext(companyId);
 }
 
 export async function seedMessagingIdentity(
@@ -229,9 +231,9 @@ export async function seedMessagingComment(
 
   // Register the body with the FakeAdapter so router.getThreadMessages can
   // surface it alongside the ref row.
-  const fakeAdapter = messagingRegistry.get("fake");
+  const ctx = await requireMessagingContext(args.companyId);
+  const fakeAdapter = ctx.adapter;
   if (
-    fakeAdapter &&
     "seedMessage" in fakeAdapter &&
     typeof (fakeAdapter as { seedMessage?: unknown }).seedMessage === "function"
   ) {
@@ -282,8 +284,8 @@ export async function postTestComment(
     agentId: args.authorAgentId,
     userId: args.authorUserId,
   });
-  const router = getMessagingRouter();
-  const posted = await router.postMessage({
+  const ctx = await requireMessagingContext(args.companyId);
+  const posted = await ctx.router.postMessage({
     companyId: args.companyId,
     issueId: args.issueId,
     projectId: args.projectId,

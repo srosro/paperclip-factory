@@ -14,7 +14,6 @@ import {
   messagingEventsInbox,
 } from "@paperclipai/db";
 import { createFakeAdapter } from "../messaging/adapters/fake/adapter.js";
-import { createMessagingRegistry } from "../messaging/registry.js";
 import { createMessagingRouter } from "../messaging/router.js";
 import { createEventsProcessor } from "../messaging/events.js";
 import {
@@ -89,9 +88,7 @@ describeIf("messaging fake-adapter E2E", () => {
     });
 
     const adapter = createFakeAdapter();
-    const registry = createMessagingRegistry();
-    registry.register(adapter);
-    const router = createMessagingRouter({ db, registry, backend: "fake" });
+    const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
     const onCreated = vi.fn().mockResolvedValue(undefined);
     const events = createEventsProcessor({

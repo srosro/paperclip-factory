@@ -1037,8 +1037,9 @@ describe("heartbeat comment wake batching", () => {
       expect(commentRefs).toHaveLength(1);
       expect(commentRefs[0]?.createdByRunId).toBe(firstRun?.id);
       // Body comes from the messaging backend, not Postgres.
-      const { getMessagingRouter } = await import("../messaging/index.js");
-      const msgs = await getMessagingRouter().getThreadMessages({ issueId });
+      const { requireMessagingContext } = await import("../messaging/index.js");
+      const ctx = await requireMessagingContext(companyId);
+      const msgs = await ctx.router.getThreadMessages({ issueId });
       expect(msgs.map((m) => m.body)).toContain("Manual completion comment from the run.");
 
       const wakeups = await db

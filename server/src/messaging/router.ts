@@ -8,7 +8,6 @@ import type {
 } from "./types.js";
 import { MessagingIdentityNotActive, MessagingThreadLocked } from "./types.js";
 import { fallbackCardText, type IssueCardInput } from "./issue-card.js";
-import type { MessagingRegistry } from "./registry.js";
 import type { createDb } from "@paperclipai/db";
 import {
   messagingChannels,
@@ -23,7 +22,11 @@ export type Db = ReturnType<typeof createDb>;
 
 export interface RouterDeps {
   db: Db;
-  registry: MessagingRegistry;
+  /**
+   * The adapter instance this router routes through. Callers resolve one via
+   * resolveMessagingContext(companyId) so the adapter is workspace-scoped.
+   */
+  adapter: MessagingAdapter;
   backend: BackendKey;
   channelNamePrefix?: string;
   /**
@@ -144,10 +147,7 @@ function buildCredential(row: {
 export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
   const prefix = deps.channelNamePrefix ?? "proj-";
   const urlBase = deps.issueUrlBase ?? "";
-
-  async function requireAdapter(): Promise<MessagingAdapter> {
-    return deps.registry.require(deps.backend);
-  }
+  const adapter = deps.adapter;
 
   async function loadIdentity(args: {
     companyId: string;
@@ -237,7 +237,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         const project = projectRows[0];
         if (!project) throw new Error(`project ${projectId} not found`);
 
-        const adapter = await requireAdapter();
+
         const nameSource = project.name ?? "proj";
         const name = normalizeChannelName(prefix + nameSource);
         const created = await adapter.createChannel({ name, purpose: "project" });
@@ -273,7 +273,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         return { id: existingAdhoc[0].id, externalRef: existingAdhoc[0].externalChannelRef };
       }
 
-      const adapter = await requireAdapter();
+
       const name = normalizeChannelName(`${prefix}issue-${issueId.slice(0, 8)}`);
       const created = await adapter.createChannel({ name, purpose: "ad_hoc" });
 
@@ -304,7 +304,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
       const card = await buildIssueCardInput(issueId);
       if (!card) throw new Error(`issue ${issueId} not found`);
 
-      const adapter = await requireAdapter();
+
       const created = await adapter.createThread({
         channelRef: channel.externalRef,
         parentBlocks: null,
@@ -369,7 +369,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         };
       }
 
-      const adapter = await requireAdapter();
+
       const posted = await adapter.postMessage({
         channelRef: channel.externalChannelRef,
         threadRef: thread.threadRef,
@@ -435,7 +435,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
       const channel = await loadChannel(thread.channelId);
       if (!channel) throw new Error(`channel for thread ${thread.id} not found`);
 
-      const adapter = await requireAdapter();
+
       if (!adapter.uploadAttachmentToThread) return { slackFileId: null };
 
       let authorIdentity: AuthorIdentity;
@@ -509,7 +509,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         .where(and(...whereClauses))
         .orderBy(messagingMessageRefs.firstSeenAt);
 
-      const adapter = await requireAdapter();
+
       const channel = await loadChannel(thread.channelId);
       if (!channel) return [];
 
@@ -550,7 +550,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
       // FakeAdapter flips an internal flag). Errors are logged and swallowed.
       if (locked) {
         try {
-          const adapter = await requireAdapter();
+
           await adapter.lockThread(thread.externalThreadRef);
         } catch (err) {
           // eslint-disable-next-line no-console
@@ -568,7 +568,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
       const card = await buildIssueCardInput(issueId);
       if (!card) return;
 
-      const adapter = await requireAdapter();
+
       try {
         await adapter.editMessage(
           channel.externalChannelRef,
@@ -586,7 +586,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
       const channel = await this.getOrCreateChannel({ companyId, projectId, issueId: undefined });
       const identity = await loadIdentity({ companyId, agentId, userId });
       if (!identity || identity.state !== "active") return;
-      const adapter = await requireAdapter();
+
       await adapter.addChannelMember(channel.externalRef, identity.externalUserRef);
     },
   };
