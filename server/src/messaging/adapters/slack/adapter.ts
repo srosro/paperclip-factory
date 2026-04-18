@@ -6,6 +6,7 @@ import type {
   PostMessageArgs,
   AuthorIdentity,
   ExternalRef,
+  IncomingFileRef,
   Message,
   MessagingEvent,
   ProvisionAgentIdentityArgs,
@@ -71,6 +72,15 @@ function tsToDate(ts: string): Date {
   return new Date(Math.floor(n * 1000));
 }
 
+interface SlackFilePayload {
+  id?: string;
+  name?: string;
+  mimetype?: string;
+  url_private?: string;
+  size?: number;
+  user?: string;
+}
+
 interface SlackMessagePayload {
   type?: string;
   subtype?: string;
@@ -82,6 +92,24 @@ interface SlackMessagePayload {
   blocks?: unknown;
   edited?: { ts?: string };
   reactions?: Array<{ name?: string; users?: string[] }>;
+  files?: SlackFilePayload[];
+}
+
+function normalizeSlackFiles(files: SlackFilePayload[] | undefined): IncomingFileRef[] | undefined {
+  if (!files || files.length === 0) return undefined;
+  const refs: IncomingFileRef[] = [];
+  for (const f of files) {
+    if (!f.id || !f.url_private) continue;
+    refs.push({
+      id: f.id,
+      name: f.name ?? f.id,
+      mimetype: f.mimetype ?? "application/octet-stream",
+      urlPrivate: f.url_private,
+      size: typeof f.size === "number" ? f.size : 0,
+      user: f.user,
+    });
+  }
+  return refs.length > 0 ? refs : undefined;
 }
 
 function payloadToMessage(payload: SlackMessagePayload, threadRef: string): Message | null {
@@ -376,6 +404,7 @@ export function normalizeSlackEvent(raw: unknown): MessagingEvent | null {
 
       const payload = evt as SlackMessagePayload & { channel?: string };
       if (!payload.ts || !payload.channel || !payload.user) return null;
+      const files = normalizeSlackFiles(payload.files);
       return {
         kind: "message",
         externalEventId: eventId,
@@ -385,6 +414,7 @@ export function normalizeSlackEvent(raw: unknown): MessagingEvent | null {
         authorExternalRef: payload.user,
         bodyRaw: payload.text ?? "",
         createdAt: tsToDate(payload.ts),
+        files,
       };
     }
     case "reaction_added":

@@ -79,6 +79,15 @@ export interface Message {
   reactions?: Record<string, string[]>;
 }
 
+export interface IncomingFileRef {
+  id: string;
+  name: string;
+  mimetype: string;
+  urlPrivate: string;
+  size: number;
+  user?: string;
+}
+
 export type MessagingEvent =
   | {
       kind: "message";
@@ -89,6 +98,7 @@ export type MessagingEvent =
       authorExternalRef: ExternalRef;
       bodyRaw: string;
       createdAt: Date;
+      files?: IncomingFileRef[];
     }
   | {
       kind: "message_changed";
