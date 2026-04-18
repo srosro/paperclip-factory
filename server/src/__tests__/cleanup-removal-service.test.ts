@@ -1,4 +1,3 @@
-// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -12,13 +11,21 @@ import {
   issueExecutionDecisions,
   issueReadStates,
   issues,
+  messagingChannels,
+  messagingIdentities,
+  messagingMessageRefs,
+  messagingThreads,
 } from "@paperclipai/db";
-// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
-const issueComments = undefined as never;
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import {
+  clearMessagingFixtures,
+  ensureTestMessaging,
+  seedMessagingComment,
+  seedMessagingIdentity,
+} from "./helpers/messaging-test-seed.js";
 import { agentService } from "../services/agents.ts";
 import { companyService } from "../services/companies.ts";
 
@@ -38,12 +45,13 @@ describeEmbeddedPostgres("cleanup removal services", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-cleanup-removal-");
     db = createDb(tempDb.connectionString);
+    ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {
     await db.delete(activityLog);
     await db.delete(issueReadStates);
-    await db.delete(issueComments);
+    await clearMessagingFixtures(db);
     await db.delete(issueExecutionDecisions);
     await db.delete(companySkills);
     await db.delete(heartbeatRuns);
@@ -104,11 +112,11 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     return { agentId, companyId, issueId, runId };
   }
 
-  it("removes agent-owned issue comments and run-linked activity before deleting the agent", async () => {
+  it("nulls out author on agent-owned messaging refs and drops run-linked activity before deleting the agent", async () => {
     const { agentId, companyId, issueId, runId } = await seedFixture();
 
-    await db.insert(issueComments).values({
-      id: randomUUID(),
+    await seedMessagingIdentity(db, { companyId, agentId });
+    const refId = await seedMessagingComment(db, {
       companyId,
       issueId,
       authorAgentId: agentId,
@@ -144,12 +152,31 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     expect(removed?.id).toBe(agentId);
     await expect(db.select().from(agents).where(eq(agents.id, agentId))).resolves.toHaveLength(0);
     await expect(db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId))).resolves.toHaveLength(0);
-    await expect(db.select().from(issueComments).where(eq(issueComments.issueId, issueId))).resolves.toHaveLength(0);
+    // The messaging ref is preserved (history intact); authorAgentId is
+    // nulled so deleting the agent doesn't leak a dangling FK.
+    const refsAfter = await db
+      .select({ id: messagingMessageRefs.id, authorAgentId: messagingMessageRefs.authorAgentId })
+      .from(messagingMessageRefs)
+      .where(eq(messagingMessageRefs.id, refId));
+    expect(refsAfter).toHaveLength(1);
+    expect(refsAfter[0]!.authorAgentId).toBeNull();
+    // The agent's messaging identity is removed.
+    await expect(
+      db.select().from(messagingIdentities).where(eq(messagingIdentities.agentId, agentId)),
+    ).resolves.toHaveLength(0);
     await expect(db.select().from(activityLog).where(eq(activityLog.companyId, companyId))).resolves.toHaveLength(0);
   });
 
   it("removes issue read states and activity rows before deleting the company", async () => {
     const { companyId, issueId, runId } = await seedFixture();
+
+    // Seed a messaging ref + thread so the cascade path exercises messaging cleanup.
+    await seedMessagingComment(db, {
+      companyId,
+      issueId,
+      authorUserId: "user-1",
+      body: "User comment",
+    });
 
     await db.insert(issueReadStates).values({
       id: randomUUID(),
@@ -186,5 +213,12 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     await expect(db.select().from(issues).where(eq(issues.id, issueId))).resolves.toHaveLength(0);
     await expect(db.select().from(issueReadStates).where(eq(issueReadStates.companyId, companyId))).resolves.toHaveLength(0);
     await expect(db.select().from(activityLog).where(eq(activityLog.companyId, companyId))).resolves.toHaveLength(0);
+    // Messaging cascade: threads + channels + refs for this company are gone.
+    await expect(
+      db.select().from(messagingThreads).where(eq(messagingThreads.issueId, issueId)),
+    ).resolves.toHaveLength(0);
+    await expect(
+      db.select().from(messagingChannels).where(eq(messagingChannels.companyId, companyId)),
+    ).resolves.toHaveLength(0);
   });
 });

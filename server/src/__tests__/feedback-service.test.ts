@@ -1,4 +1,3 @@
-// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -23,9 +22,14 @@ import {
   instanceSettings,
   issueDocuments,
   issues,
+  messagingMessageRefs,
 } from "@paperclipai/db";
-// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
-const issueComments = undefined as never;
+import {
+  clearMessagingFixtures,
+  ensureTestMessaging,
+  seedMessagingComment,
+  seedMessagingIdentity,
+} from "./helpers/messaging-test-seed.js";
 import { feedbackService } from "../services/feedback.ts";
 
 type EmbeddedPostgresInstance = {
@@ -111,6 +115,7 @@ describe("feedbackService.saveIssueVote", () => {
     svc = feedbackService(db);
     instance = started.instance;
     dataDir = started.dataDir;
+    ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {
@@ -120,7 +125,7 @@ describe("feedbackService.saveIssueVote", () => {
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
     await db.delete(documents);
-    await db.delete(issueComments);
+    await clearMessagingFixtures(db);
     await db.delete(costEvents);
     await db.delete(heartbeatRuns);
     await db.delete(companySkills);
@@ -176,7 +181,8 @@ describe("feedbackService.saveIssueVote", () => {
       createdByUserId: "user-1",
     });
 
-    await db.insert(issueComments).values({
+    await seedMessagingIdentity(db, { companyId, agentId });
+    await seedMessagingComment(db, {
       id: commentId,
       companyId,
       issueId,
@@ -312,35 +318,34 @@ describe("feedbackService.saveIssueVote", () => {
       occurredAt: new Date("2026-03-30T10:05:00.000Z"),
     });
 
-    await db.insert(issueComments).values([
-      {
-        id: earlierCommentId,
-        companyId,
-        issueId,
-        authorAgentId: agentId,
-        createdByRunId: runId,
-        body: "Previous comment with ops@example.com in it.",
-        createdAt: new Date("2026-03-30T10:01:00.000Z"),
-      },
-      {
-        id: targetCommentId,
-        companyId,
-        issueId,
-        authorAgentId: agentId,
-        createdByRunId: runId,
-        body: "Target output with api_key=secret-value and Bearer secret-token.",
-        createdAt: new Date("2026-03-30T10:02:00.000Z"),
-      },
-      {
-        id: laterCommentId,
-        companyId,
-        issueId,
-        authorAgentId: agentId,
-        createdByRunId: runId,
-        body: "Later comment mentions 555 111 2222 for follow-up.",
-        createdAt: new Date("2026-03-30T10:03:00.000Z"),
-      },
-    ]);
+    await seedMessagingIdentity(db, { companyId, agentId });
+    await seedMessagingComment(db, {
+      id: earlierCommentId,
+      companyId,
+      issueId,
+      authorAgentId: agentId,
+      createdByRunId: runId,
+      body: "Previous comment with ops@example.com in it.",
+      createdAt: new Date("2026-03-30T10:01:00.000Z"),
+    });
+    await seedMessagingComment(db, {
+      id: targetCommentId,
+      companyId,
+      issueId,
+      authorAgentId: agentId,
+      createdByRunId: runId,
+      body: "Target output with api_key=secret-value and Bearer secret-token.",
+      createdAt: new Date("2026-03-30T10:02:00.000Z"),
+    });
+    await seedMessagingComment(db, {
+      id: laterCommentId,
+      companyId,
+      issueId,
+      authorAgentId: agentId,
+      createdByRunId: runId,
+      body: "Later comment mentions 555 111 2222 for follow-up.",
+      createdAt: new Date("2026-03-30T10:03:00.000Z"),
+    });
 
     return { companyId, issueId, targetCommentId, runId };
   }
@@ -464,7 +469,8 @@ describe("feedbackService.saveIssueVote", () => {
       },
     });
 
-    await db.insert(issueComments).values({
+    await seedMessagingIdentity(db, { companyId, agentId });
+    await seedMessagingComment(db, {
       id: commentId,
       companyId,
       issueId,
@@ -733,16 +739,16 @@ describe("feedbackService.saveIssueVote", () => {
     const { companyId, issueId, commentId: firstCommentId } = await seedIssueWithAgentComment();
     const secondCommentId = randomUUID();
     const agentId = await db
-      .select({ authorAgentId: issueComments.authorAgentId })
-      .from(issueComments)
-      .where(eq(issueComments.id, firstCommentId))
+      .select({ authorAgentId: messagingMessageRefs.authorAgentId })
+      .from(messagingMessageRefs)
+      .where(eq(messagingMessageRefs.id, firstCommentId))
       .then((rows) => rows[0]?.authorAgentId ?? null);
 
-    await db.insert(issueComments).values({
+    await seedMessagingComment(db, {
       id: secondCommentId,
       companyId,
       issueId,
-      authorAgentId: agentId,
+      authorAgentId: agentId ?? undefined,
       body: "Second AI generated update",
     });
 
@@ -1006,7 +1012,8 @@ describe("feedbackService.saveIssueVote", () => {
       createdByUserId: "user-1",
     });
 
-    await db.insert(issueComments).values({
+    await seedMessagingIdentity(db, { companyId, userId: "user-2" });
+    await seedMessagingComment(db, {
       id: commentId,
       companyId,
       issueId,
@@ -1080,16 +1087,16 @@ describe("feedbackService.saveIssueVote", () => {
     const { companyId, issueId, commentId: firstCommentId } = await seedIssueWithAgentComment();
     const secondCommentId = randomUUID();
     const agentId = await db
-      .select({ authorAgentId: issueComments.authorAgentId })
-      .from(issueComments)
-      .where(eq(issueComments.id, firstCommentId))
+      .select({ authorAgentId: messagingMessageRefs.authorAgentId })
+      .from(messagingMessageRefs)
+      .where(eq(messagingMessageRefs.id, firstCommentId))
       .then((rows) => rows[0]?.authorAgentId ?? null);
 
-    await db.insert(issueComments).values({
+    await seedMessagingComment(db, {
       id: secondCommentId,
       companyId,
       issueId,
-      authorAgentId: agentId,
+      authorAgentId: agentId ?? undefined,
       body: "Second AI generated update",
     });
 

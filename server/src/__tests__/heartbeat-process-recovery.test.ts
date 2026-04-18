@@ -1,4 +1,3 @@
-// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { eq } from "drizzle-orm";
@@ -14,9 +13,14 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issues,
+  messagingMessageRefs,
+  messagingThreads,
+  projects,
 } from "@paperclipai/db";
-// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
-const issueComments = undefined as never;
+import {
+  clearMessagingFixtures,
+  ensureTestMessaging,
+} from "./helpers/messaging-test-seed.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -155,6 +159,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-recovery-");
     db = createDb(tempDb.connectionString);
+    ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {
@@ -183,7 +188,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.delete(activityLog);
     await db.delete(agentRuntimeState);
     await db.delete(companySkills);
-    await db.delete(issueComments);
+    await clearMessagingFixtures(db);
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
@@ -598,10 +603,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
     expect(issue?.status).toBe("blocked");
 
-    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments).toHaveLength(1);
-    expect(comments[0]?.body).toContain("retried dispatch");
-    expect(comments[0]?.body).toContain("Latest retry failure: `process_lost` - run failed before issue advanced.");
+    const commentRefs = await db
+      .select({ id: messagingMessageRefs.id })
+      .from(messagingMessageRefs)
+      .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+      .where(eq(messagingThreads.issueId, issueId));
+    expect(commentRefs).toHaveLength(1);
+    // Body lives in the messaging backend; fetch via the router-equivalent
+    // path exposed on the test helper rather than via SQL.
+    const bodies = await (async () => {
+      const { getMessagingRouter } = await import("../messaging/index.js");
+      const msgs = await getMessagingRouter().getThreadMessages({ issueId });
+      return msgs.map((m) => m.body);
+    })();
+    expect(bodies.join("\n")).toContain("retried dispatch");
+    expect(bodies.join("\n")).toContain("Latest retry failure: `process_lost` - run failed before issue advanced.");
   });
 
   it("re-enqueues continuation for stranded in-progress work with no active run", async () => {
@@ -647,10 +663,19 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
     expect(issue?.status).toBe("blocked");
 
-    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments).toHaveLength(1);
-    expect(comments[0]?.body).toContain("retried continuation");
-    expect(comments[0]?.body).toContain("Latest retry failure: `process_lost` - run failed before issue advanced.");
+    const commentRefs = await db
+      .select({ id: messagingMessageRefs.id })
+      .from(messagingMessageRefs)
+      .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+      .where(eq(messagingThreads.issueId, issueId));
+    expect(commentRefs).toHaveLength(1);
+    const bodies = await (async () => {
+      const { getMessagingRouter } = await import("../messaging/index.js");
+      const msgs = await getMessagingRouter().getThreadMessages({ issueId });
+      return msgs.map((m) => m.body);
+    })();
+    expect(bodies.join("\n")).toContain("retried continuation");
+    expect(bodies.join("\n")).toContain("Latest retry failure: `process_lost` - run failed before issue advanced.");
   });
 
   it("does not reconcile user-assigned work through the agent stranded-work recovery path", async () => {

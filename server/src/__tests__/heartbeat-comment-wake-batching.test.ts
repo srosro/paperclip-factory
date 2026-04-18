@@ -1,4 +1,3 @@
-// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -17,9 +16,14 @@ import {
   ensurePostgresDatabase,
   heartbeatRuns,
   issues,
+  messagingMessageRefs,
+  messagingThreads,
 } from "@paperclipai/db";
-// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
-const issueComments = undefined as never;
+import {
+  ensureTestMessaging,
+  seedMessagingComment,
+  seedMessagingIdentity,
+} from "./helpers/messaging-test-seed.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 
 type EmbeddedPostgresInstance = {
@@ -228,6 +232,7 @@ describe("heartbeat comment wake batching", () => {
     db = createDb(started.connectionString);
     instance = started.instance;
     dataDir = started.dataDir;
+    ensureTestMessaging(db);
   }, 45_000);
 
   afterAll(async () => {
@@ -286,16 +291,16 @@ describe("heartbeat comment wake batching", () => {
         identifier: `${issuePrefix}-1`,
       });
 
-      const comment1 = await db
-        .insert(issueComments)
-        .values({
+      await seedMessagingIdentity(db, { companyId, userId: "user-1" });
+      await seedMessagingIdentity(db, { companyId, agentId });
+      const comment1 = {
+        id: await seedMessagingComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
           body: "First comment",
-        })
-        .returning()
-        .then((rows) => rows[0]);
+        }),
+      };
       const firstRun = await heartbeat.wakeup(agentId, {
         source: "automation",
         triggerDetail: "system",
@@ -314,7 +319,7 @@ describe("heartbeat comment wake batching", () => {
       expect(firstRun).not.toBeNull();
       await waitFor(() => gateway.getAgentPayloads().length === 1);
 
-      await db.insert(issueComments).values({
+      await seedMessagingComment(db, {
         companyId,
         issueId,
         authorAgentId: agentId,
@@ -322,26 +327,22 @@ describe("heartbeat comment wake batching", () => {
         body: "Heartbeat acknowledged",
       });
 
-      const comment2 = await db
-        .insert(issueComments)
-        .values({
+      const comment2 = {
+        id: await seedMessagingComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
           body: "Second comment",
-        })
-        .returning()
-        .then((rows) => rows[0]);
-      const comment3 = await db
-        .insert(issueComments)
-        .values({
+        }),
+      };
+      const comment3 = {
+        id: await seedMessagingComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
           body: "Third comment",
-        })
-        .returning()
-        .then((rows) => rows[0]);
+        }),
+      };
 
       const secondRun = await heartbeat.wakeup(agentId, {
         source: "automation",
@@ -479,16 +480,16 @@ describe("heartbeat comment wake batching", () => {
         identifier: `${issuePrefix}-1`,
       });
 
-      const comment1 = await db
-        .insert(issueComments)
-        .values({
+      await seedMessagingIdentity(db, { companyId, userId: "user-1" });
+      await seedMessagingIdentity(db, { companyId, agentId });
+      const comment1 = {
+        id: await seedMessagingComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
           body: "First comment",
-        })
-        .returning()
-        .then((rows) => rows[0]);
+        }),
+      };
 
       const firstRun = await heartbeat.wakeup(agentId, {
         source: "automation",
@@ -515,16 +516,14 @@ describe("heartbeat comment wake batching", () => {
         return run?.status === "running";
       });
 
-      const comment2 = await db
-        .insert(issueComments)
-        .values({
+      const comment2 = {
+        id: await seedMessagingComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
           body: "Please handle this follow-up after you finish",
-        })
-        .returning()
-        .then((rows) => rows[0]);
+        }),
+      };
 
       const deferredRun = await heartbeat.wakeup(agentId, {
         source: "automation",
@@ -745,8 +744,9 @@ describe("heartbeat comment wake batching", () => {
 
       const comments = await db
         .select()
-        .from(issueComments)
-        .where(eq(issueComments.issueId, issueId));
+        .from(messagingMessageRefs)
+        .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+        .where(eq(messagingThreads.issueId, issueId));
       expect(comments).toHaveLength(0);
 
       await waitFor(async () => {
@@ -856,16 +856,15 @@ describe("heartbeat comment wake batching", () => {
       expect(primaryRun).not.toBeNull();
       await waitFor(() => gateway.getAgentPayloads().length === 1);
 
-      const mentionComment = await db
-        .insert(issueComments)
-        .values({
+      await seedMessagingIdentity(db, { companyId, userId: "user-1" });
+      const mentionComment = {
+        id: await seedMessagingComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
           body: "@Mentioned Agent please inspect this after the current run.",
-        })
-        .returning()
-        .then((rows) => rows[0]);
+        }),
+      };
 
       const mentionRun = await heartbeat.wakeup(mentionedAgentId, {
         source: "automation",
@@ -996,7 +995,8 @@ describe("heartbeat comment wake batching", () => {
       expect(firstRun).not.toBeNull();
       await waitFor(() => gateway.getAgentPayloads().length === 1);
 
-      await db.insert(issueComments).values({
+      await seedMessagingIdentity(db, { companyId, agentId });
+      await seedMessagingComment(db, {
         companyId,
         issueId,
         authorAgentId: agentId,
@@ -1024,15 +1024,22 @@ describe("heartbeat comment wake batching", () => {
       expect(runs[0]?.issueCommentStatus).toBe("satisfied");
       expect(runs[0]?.issueCommentSatisfiedByCommentId).not.toBeNull();
 
-      const comments = await db
-        .select()
-        .from(issueComments)
-        .where(eq(issueComments.issueId, issueId))
-        .orderBy(asc(issueComments.createdAt));
+      const commentRefs = await db
+        .select({
+          id: messagingMessageRefs.id,
+          createdByRunId: messagingMessageRefs.createdByRunId,
+        })
+        .from(messagingMessageRefs)
+        .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+        .where(eq(messagingThreads.issueId, issueId))
+        .orderBy(asc(messagingMessageRefs.firstSeenAt));
 
-      expect(comments).toHaveLength(1);
-      expect(comments[0]?.body).toBe("Manual completion comment from the run.");
-      expect(comments[0]?.createdByRunId).toBe(firstRun?.id);
+      expect(commentRefs).toHaveLength(1);
+      expect(commentRefs[0]?.createdByRunId).toBe(firstRun?.id);
+      // Body comes from the messaging backend, not Postgres.
+      const { getMessagingRouter } = await import("../messaging/index.js");
+      const msgs = await getMessagingRouter().getThreadMessages({ issueId });
+      expect(msgs.map((m) => m.body)).toContain("Manual completion comment from the run.");
 
       const wakeups = await db
         .select()
