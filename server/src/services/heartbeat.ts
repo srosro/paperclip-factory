@@ -1,3 +1,4 @@
+// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
@@ -13,11 +14,12 @@ import {
   companySkills as companySkillsTable,
   heartbeatRunEvents,
   heartbeatRuns,
-  issueComments,
   issues,
   projects,
   projectWorkspaces,
 } from "@paperclipai/db";
+// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
+const issueComments = undefined as never;
 import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";

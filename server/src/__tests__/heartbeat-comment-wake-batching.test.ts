@@ -1,3 +1,4 @@
+// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -15,9 +16,10 @@ import {
   createDb,
   ensurePostgresDatabase,
   heartbeatRuns,
-  issueComments,
   issues,
 } from "@paperclipai/db";
+// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
+const issueComments = undefined as never;
 import { heartbeatService } from "../services/heartbeat.ts";
 
 type EmbeddedPostgresInstance = {

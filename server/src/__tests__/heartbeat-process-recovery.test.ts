@@ -1,3 +1,4 @@
+// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { eq } from "drizzle-orm";
@@ -12,9 +13,10 @@ import {
   createDb,
   heartbeatRunEvents,
   heartbeatRuns,
-  issueComments,
   issues,
 } from "@paperclipai/db";
+// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
+const issueComments = undefined as never;
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,

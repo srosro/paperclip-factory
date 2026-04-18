@@ -1,3 +1,4 @@
+// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { and, asc, desc, eq, getTableColumns, gte, lte, ne, or } from "drizzle-orm";
@@ -14,10 +15,11 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   instanceSettings,
-  issueComments,
   issueDocuments,
   issues,
 } from "@paperclipai/db";
+// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
+const issueComments = undefined as never;
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { claudeConfigDir, parseClaudeStreamJson } from "@paperclipai/adapter-claude-local/server";
 import { codexHomeDir, parseCodexJsonl } from "@paperclipai/adapter-codex-local/server";

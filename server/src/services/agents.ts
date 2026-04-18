@@ -1,3 +1,4 @@
+// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -14,8 +15,9 @@ import {
   heartbeatRuns,
   issueExecutionDecisions,
   issues,
-  issueComments,
 } from "@paperclipai/db";
+// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
+const issueComments = undefined as never;
 import { isUuidLike, normalizeAgentUrlKey } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";

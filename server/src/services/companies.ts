@@ -1,3 +1,4 @@
+// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { and, count, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -10,7 +11,6 @@ import {
   agentTaskSessions,
   agentWakeupRequests,
   issues,
-  issueComments,
   projects,
   goals,
   heartbeatRuns,
@@ -28,6 +28,8 @@ import {
   companyMemberships,
   companySkills,
 } from "@paperclipai/db";
+// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
+const issueComments = undefined as never;
 import { notFound, unprocessable } from "../errors.js";
 
 export function companyService(db: Db) {
