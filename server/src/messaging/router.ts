@@ -1,0 +1,412 @@
+import { eq, and, gt } from "drizzle-orm";
+import type {
+  BackendKey,
+  AuthorIdentity,
+  AdapterCredential,
+  MessagingAdapter,
+} from "./types.js";
+import { MessagingIdentityNotActive, MessagingThreadLocked } from "./types.js";
+import { fallbackCardText, type IssueCardInput } from "./issue-card.js";
+import type { MessagingRegistry } from "./registry.js";
+import type { createDb } from "@paperclipai/db";
+import {
+  messagingChannels,
+  messagingThreads,
+  messagingIdentities,
+  messagingMessageRefs,
+  issues as issuesTable,
+  projects as projectsTable,
+} from "@paperclipai/db";
+
+export type Db = ReturnType<typeof createDb>;
+
+export interface RouterDeps {
+  db: Db;
+  registry: MessagingRegistry;
+  backend: BackendKey;
+  channelNamePrefix?: string;
+  /**
+   * Optional — public-facing base URL for issue links embedded in thread cards.
+   * Example: "https://paperclip.local".
+   */
+  issueUrlBase?: string;
+}
+
+export interface RouterPostArgs {
+  companyId: string;
+  issueId: string;
+  projectId: string;
+  authorAgentId?: string;
+  authorUserId?: string;
+  body: string;
+  createdByRunId?: string;
+  blocks?: unknown;
+}
+
+export interface RouterReadMessage {
+  refId: string;
+  externalMessageRef: string;
+  body: string;
+  authorAgentId: string | null;
+  authorUserId: string | null;
+  createdByRunId: string | null;
+  firstSeenAt: Date;
+  editedAt: Date | null;
+  deletedAt: Date | null;
+  suppressedForWake: boolean;
+}
+
+export interface MessagingRouter {
+  backend: BackendKey;
+  getOrCreateChannel(args: {
+    companyId: string;
+    projectId: string;
+  }): Promise<{ id: string; externalRef: string }>;
+  getOrCreateThread(args: {
+    companyId: string;
+    issueId: string;
+    projectId: string;
+  }): Promise<{ id: string; threadRef: string; channelId: string }>;
+  postMessage(args: RouterPostArgs): Promise<{
+    id: string;
+    externalMessageRef: string;
+    createdAt: Date;
+  }>;
+  getThreadMessages(args: {
+    issueId: string;
+    afterRefId?: string;
+  }): Promise<RouterReadMessage[]>;
+  onIssueStateChange(issueId: string): Promise<void>;
+  ensureChannelMember(args: {
+    companyId: string;
+    projectId: string;
+    agentId?: string;
+    userId?: string;
+  }): Promise<void>;
+}
+
+export function normalizeChannelName(raw: string, maxLen = 80): string {
+  const cleaned = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maxLen);
+  return cleaned.length ? cleaned : "proj";
+}
+
+function buildCredential(row: {
+  authBlobSecretId: string | null;
+}): AdapterCredential {
+  if (row.authBlobSecretId) {
+    return { kind: "user_token", secretId: row.authBlobSecretId };
+  }
+  return { kind: "none" };
+}
+
+export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
+  const prefix = deps.channelNamePrefix ?? "proj-";
+  const urlBase = deps.issueUrlBase ?? "";
+
+  async function requireAdapter(): Promise<MessagingAdapter> {
+    return deps.registry.require(deps.backend);
+  }
+
+  async function loadIdentity(args: {
+    companyId: string;
+    agentId?: string;
+    userId?: string;
+  }) {
+    const whereClauses = [
+      eq(messagingIdentities.backend, deps.backend),
+      eq(messagingIdentities.companyId, args.companyId),
+    ];
+    if (args.agentId) {
+      whereClauses.push(eq(messagingIdentities.agentId, args.agentId));
+    } else if (args.userId) {
+      whereClauses.push(eq(messagingIdentities.userId, args.userId));
+    } else {
+      return undefined;
+    }
+    const rows = await deps.db
+      .select()
+      .from(messagingIdentities)
+      .where(and(...whereClauses))
+      .limit(1);
+    return rows[0];
+  }
+
+  async function loadChannel(channelId: string) {
+    const rows = await deps.db
+      .select()
+      .from(messagingChannels)
+      .where(eq(messagingChannels.id, channelId))
+      .limit(1);
+    return rows[0];
+  }
+
+  async function loadThread(issueId: string) {
+    const rows = await deps.db
+      .select()
+      .from(messagingThreads)
+      .where(eq(messagingThreads.issueId, issueId))
+      .limit(1);
+    return rows[0];
+  }
+
+  async function buildIssueCardInput(issueId: string): Promise<IssueCardInput | null> {
+    const rows = await deps.db
+      .select()
+      .from(issuesTable)
+      .where(eq(issuesTable.id, issueId))
+      .limit(1);
+    const issue = rows[0];
+    if (!issue) return null;
+    return {
+      identifier: issue.identifier ?? issue.id.slice(0, 8),
+      title: issue.title ?? "",
+      status: issue.status ?? "",
+      priority: issue.priority ?? undefined,
+      descriptionExcerpt: issue.description?.slice(0, 200) ?? undefined,
+      issueUrl: `${urlBase}/issues/${issue.id}`,
+    };
+  }
+
+  const router: MessagingRouter = {
+    backend: deps.backend,
+
+    async getOrCreateChannel({ companyId, projectId }) {
+      const existing = await deps.db
+        .select()
+        .from(messagingChannels)
+        .where(
+          and(
+            eq(messagingChannels.companyId, companyId),
+            eq(messagingChannels.backend, deps.backend),
+            eq(messagingChannels.projectId, projectId),
+          ),
+        )
+        .limit(1);
+      if (existing[0]) {
+        return { id: existing[0].id, externalRef: existing[0].externalChannelRef };
+      }
+
+      const projectRows = await deps.db
+        .select({ name: projectsTable.name })
+        .from(projectsTable)
+        .where(eq(projectsTable.id, projectId))
+        .limit(1);
+      const project = projectRows[0];
+      if (!project) throw new Error(`project ${projectId} not found`);
+
+      const adapter = await requireAdapter();
+      const nameSource = project.name ?? "proj";
+      const name = normalizeChannelName(prefix + nameSource);
+      const created = await adapter.createChannel({ name, purpose: "project" });
+
+      const [row] = await deps.db
+        .insert(messagingChannels)
+        .values({
+          companyId,
+          backend: deps.backend,
+          purpose: "project",
+          projectId,
+          externalChannelRef: created.externalRef,
+          externalChannelName: created.name,
+        })
+        .returning();
+      return { id: row!.id, externalRef: row!.externalChannelRef };
+    },
+
+    async getOrCreateThread({ companyId, issueId, projectId }) {
+      const existing = await loadThread(issueId);
+      if (existing) {
+        return {
+          id: existing.id,
+          threadRef: existing.externalThreadRef,
+          channelId: existing.channelId,
+        };
+      }
+
+      const channel = await this.getOrCreateChannel({ companyId, projectId });
+      const card = await buildIssueCardInput(issueId);
+      if (!card) throw new Error(`issue ${issueId} not found`);
+
+      const adapter = await requireAdapter();
+      const created = await adapter.createThread({
+        channelRef: channel.externalRef,
+        parentBlocks: null,
+        fallbackText: fallbackCardText(card),
+      });
+
+      const [row] = await deps.db
+        .insert(messagingThreads)
+        .values({
+          issueId,
+          channelId: channel.id,
+          backend: deps.backend,
+          externalThreadRef: created.threadRef,
+          parentMessageRef: created.parentMessageRef,
+        })
+        .returning();
+      return {
+        id: row!.id,
+        threadRef: row!.externalThreadRef,
+        channelId: row!.channelId,
+      };
+    },
+
+    async postMessage(args) {
+      const thread = await this.getOrCreateThread({
+        companyId: args.companyId,
+        issueId: args.issueId,
+        projectId: args.projectId,
+      });
+
+      const threadRow = await loadThread(args.issueId);
+      if (threadRow?.state === "locked") {
+        throw new MessagingThreadLocked(thread.id);
+      }
+
+      const identity = await loadIdentity({
+        companyId: args.companyId,
+        agentId: args.authorAgentId,
+        userId: args.authorUserId,
+      });
+      if (!identity || identity.state !== "active") {
+        throw new MessagingIdentityNotActive(identity?.id ?? "none");
+      }
+
+      const channel = await loadChannel(thread.channelId);
+      if (!channel) throw new Error(`channel for thread ${thread.id} not found`);
+
+      const authorIdentity: AuthorIdentity = {
+        backend: deps.backend,
+        externalUserRef: identity.externalUserRef,
+        credential: buildCredential(identity),
+      };
+
+      const adapter = await requireAdapter();
+      const posted = await adapter.postMessage({
+        channelRef: channel.externalChannelRef,
+        threadRef: thread.threadRef,
+        authorIdentity,
+        body: args.body,
+        blocks: args.blocks,
+      });
+
+      const [inserted] = await deps.db
+        .insert(messagingMessageRefs)
+        .values({
+          threadId: thread.id,
+          backend: deps.backend,
+          externalMessageRef: posted.messageRef,
+          authorAgentId: args.authorAgentId ?? null,
+          authorUserId: args.authorUserId ?? null,
+          createdByRunId: args.createdByRunId ?? null,
+        })
+        .onConflictDoUpdate({
+          target: [
+            messagingMessageRefs.backend,
+            messagingMessageRefs.externalMessageRef,
+          ],
+          set: {
+            authorAgentId: args.authorAgentId ?? null,
+            authorUserId: args.authorUserId ?? null,
+            createdByRunId: args.createdByRunId ?? null,
+          },
+        })
+        .returning();
+      return {
+        id: inserted!.id,
+        externalMessageRef: inserted!.externalMessageRef,
+        createdAt: posted.createdAt,
+      };
+    },
+
+    async getThreadMessages({ issueId, afterRefId }) {
+      const thread = await loadThread(issueId);
+      if (!thread) return [];
+
+      let afterFirstSeen: Date | null = null;
+      if (afterRefId) {
+        const [cursorRow] = await deps.db
+          .select({ firstSeenAt: messagingMessageRefs.firstSeenAt })
+          .from(messagingMessageRefs)
+          .where(eq(messagingMessageRefs.id, afterRefId))
+          .limit(1);
+        if (cursorRow) afterFirstSeen = cursorRow.firstSeenAt;
+      }
+
+      const whereClauses = [eq(messagingMessageRefs.threadId, thread.id)];
+      if (afterFirstSeen) {
+        whereClauses.push(gt(messagingMessageRefs.firstSeenAt, afterFirstSeen));
+      }
+
+      const refs = await deps.db
+        .select()
+        .from(messagingMessageRefs)
+        .where(and(...whereClauses))
+        .orderBy(messagingMessageRefs.firstSeenAt);
+
+      const adapter = await requireAdapter();
+      const channel = await loadChannel(thread.channelId);
+      if (!channel) return [];
+
+      const liveMessages = await adapter.getThreadMessages(
+        channel.externalChannelRef,
+        thread.externalThreadRef,
+      );
+      const bodyByRef = new Map(
+        liveMessages.map((m) => [m.externalMessageRef, m.body]),
+      );
+
+      return refs
+        .filter((r) => !r.deletedAt)
+        .map((r) => ({
+          refId: r.id,
+          externalMessageRef: r.externalMessageRef,
+          body: bodyByRef.get(r.externalMessageRef) ?? "",
+          authorAgentId: r.authorAgentId,
+          authorUserId: r.authorUserId,
+          createdByRunId: r.createdByRunId,
+          firstSeenAt: r.firstSeenAt,
+          editedAt: r.editedAt,
+          deletedAt: r.deletedAt,
+          suppressedForWake: r.suppressedForWake,
+        }));
+    },
+
+    async onIssueStateChange(issueId) {
+      const thread = await loadThread(issueId);
+      if (!thread) return;
+      const channel = await loadChannel(thread.channelId);
+      if (!channel) return;
+
+      const card = await buildIssueCardInput(issueId);
+      if (!card) return;
+
+      const adapter = await requireAdapter();
+      try {
+        await adapter.editMessage(
+          channel.externalChannelRef,
+          thread.parentMessageRef,
+          fallbackCardText(card),
+        );
+      } catch (err) {
+        // Card update is fire-and-forget; log but do not fail caller.
+        // eslint-disable-next-line no-console
+        console.warn(`messaging: issue card edit failed for ${issueId}`, err);
+      }
+    },
+
+    async ensureChannelMember({ companyId, projectId, agentId, userId }) {
+      const channel = await this.getOrCreateChannel({ companyId, projectId });
+      const identity = await loadIdentity({ companyId, agentId, userId });
+      if (!identity || identity.state !== "active") return;
+      const adapter = await requireAdapter();
+      await adapter.addChannelMember(channel.externalRef, identity.externalUserRef);
+    },
+  };
+
+  return router;
+}
