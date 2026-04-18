@@ -29,6 +29,13 @@ export interface SlackDeps {
    */
   companyId?: string;
   nowMs?: () => number;
+  /**
+   * Optional: translate an outbound agent body before it goes to Slack.
+   * Applied in `postMessage`. When present, it runs on the raw body and the
+   * adapter passes the returned string as `text` to `chat.postMessage`.
+   * Part 9 wires this to GFM→mrkdwn + agent-name→<@Uxxx> resolution.
+   */
+  rewriteOutboundBody?: (companyId: string, body: string) => Promise<string>;
 }
 
 const capabilities: CapabilityFlags = {
@@ -189,11 +196,14 @@ export function createSlackAdapter(deps: SlackDeps): MessagingAdapter {
       createdAt: Date;
     }> {
       const client = await clientForIdentity(args.authorIdentity);
+      const rewritten = deps.rewriteOutboundBody
+        ? await deps.rewriteOutboundBody(requireCompanyId(deps), args.body)
+        : args.body;
       const res = await withRetry(() =>
         client.chat.postMessage({
           channel: args.channelRef,
           thread_ts: args.threadRef,
-          text: args.body,
+          text: rewritten,
           blocks: (args.blocks as never) ?? undefined,
         }),
       );

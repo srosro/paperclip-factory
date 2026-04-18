@@ -1,0 +1,124 @@
+import { eq, and, inArray } from "drizzle-orm";
+import { agents, messagingIdentities } from "@paperclipai/db";
+import type { Db } from "../../router.js";
+import { fromGfm, toGfm } from "./mrkdwn.js";
+
+const MENTION_RE = /\B@([A-Za-z0-9._-]+)/g;
+const SLACK_MENTION_RE = /<@([A-Z0-9_]+)>/g;
+
+/**
+ * Outbound: agent body uses `@claudecoder`. Rewrite to Slack-native `<@U…>`
+ * tokens by looking up the backend identity for each name.
+ */
+export async function toExternalMentions(
+  db: Db,
+  companyId: string,
+  body: string,
+): Promise<string> {
+  const names = Array.from(body.matchAll(MENTION_RE), (m) => m[1]).filter(
+    (n): n is string => typeof n === "string" && n.length > 0,
+  );
+  if (names.length === 0) return body;
+
+  const rows = await db
+    .select({
+      agentName: agents.name,
+      externalRef: messagingIdentities.externalUserRef,
+    })
+    .from(messagingIdentities)
+    .innerJoin(agents, eq(messagingIdentities.agentId, agents.id))
+    .where(
+      and(
+        eq(messagingIdentities.backend, "slack"),
+        eq(messagingIdentities.companyId, companyId),
+        inArray(agents.name, [...new Set(names)]),
+      ),
+    );
+  const byName = new Map(rows.map((r) => [r.agentName, r.externalRef]));
+
+  return body.replace(MENTION_RE, (_full, name: string) => {
+    const ext = byName.get(name);
+    return ext ? `<@${ext}>` : `@${name}`;
+  });
+}
+
+export interface InternalMentionResult {
+  rewritten: string;
+  mentionedAgentIds: string[];
+}
+
+/**
+ * Inbound: Slack payload carries `<@U…>` references. Rewrite to Paperclip's
+ * `@name` form for index/UI storage, and return the resolved Paperclip agent
+ * ids for wake dispatch.
+ */
+export async function toInternalMentions(
+  db: Db,
+  body: string,
+): Promise<InternalMentionResult> {
+  const refs = Array.from(body.matchAll(SLACK_MENTION_RE), (m) => m[1]).filter(
+    (r): r is string => typeof r === "string" && r.length > 0,
+  );
+  if (refs.length === 0) return { rewritten: body, mentionedAgentIds: [] };
+
+  const rows = await db
+    .select({
+      externalRef: messagingIdentities.externalUserRef,
+      agentId: messagingIdentities.agentId,
+      agentName: agents.name,
+    })
+    .from(messagingIdentities)
+    .leftJoin(agents, eq(messagingIdentities.agentId, agents.id))
+    .where(
+      and(
+        eq(messagingIdentities.backend, "slack"),
+        inArray(messagingIdentities.externalUserRef, [...new Set(refs)]),
+      ),
+    );
+  const byRef = new Map(rows.map((r) => [r.externalRef, r]));
+
+  const rewritten = body.replace(SLACK_MENTION_RE, (_full, ref: string) => {
+    const row = byRef.get(ref);
+    return row?.agentName ? `@${row.agentName}` : `<@${ref}>`;
+  });
+
+  const mentionedAgentIds = rows
+    .map((r) => r.agentId)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  return { rewritten, mentionedAgentIds };
+}
+
+/**
+ * Convenience used by the events module: pass raw body, get back the agent
+ * ids mentioned. Always backend=slack; the router-agnostic form is
+ * `resolveMentions(rawBody)` in `EventsDeps`.
+ */
+export async function resolveSlackMentions(
+  db: Db,
+  rawBody: string,
+): Promise<string[]> {
+  const { mentionedAgentIds } = await toInternalMentions(db, rawBody);
+  return mentionedAgentIds;
+}
+
+/**
+ * Outbound body rewrite combining GFM→mrkdwn translation and @name→<@Uxxx>
+ * mention resolution. Drop-in for `SlackDeps.rewriteOutboundBody`.
+ */
+export async function rewriteOutboundBodyForSlack(
+  db: Db,
+  companyId: string,
+  body: string,
+): Promise<string> {
+  const withMentions = await toExternalMentions(db, companyId, body);
+  return fromGfm(withMentions);
+}
+
+/**
+ * Inbound body rewrite to canonical GFM form. Useful for UIs and indexes that
+ * need a backend-neutral rendering; Phase 1 doesn't persist bodies so this is
+ * called on-demand.
+ */
+export function rewriteInboundBodyFromSlack(body: string): string {
+  return toGfm(body);
+}
