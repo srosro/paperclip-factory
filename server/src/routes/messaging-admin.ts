@@ -1,12 +1,17 @@
 import { Router, type Request, type Response } from "express";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import {
   agents as agentsTable,
+  issues as issuesTable,
+  messagingChannels,
   messagingIdentities,
+  messagingMessageRefs,
+  messagingThreads,
   messagingWorkspaceInstall,
   type Db,
 } from "@paperclipai/db";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
+import { notFound } from "../errors.js";
 
 export interface MessagingAgentIdentityStatus {
   agentId: string;
@@ -90,6 +95,77 @@ export function messagingAdminRoutes(db: Db): Router {
         agentIdentities,
       };
       res.json(response);
+    },
+  );
+
+  router.get(
+    "/messaging/diagnose/:issueId",
+    async (req: Request, res: Response) => {
+      assertBoard(req);
+      const issueId = req.params.issueId as string;
+
+      const [issue] = await db
+        .select({ id: issuesTable.id, companyId: issuesTable.companyId })
+        .from(issuesTable)
+        .where(eq(issuesTable.id, issueId))
+        .limit(1);
+      if (!issue) throw notFound("Issue not found");
+      assertCompanyAccess(req, issue.companyId);
+
+      const [thread] = await db
+        .select({
+          id: messagingThreads.id,
+          issueId: messagingThreads.issueId,
+          channelId: messagingThreads.channelId,
+          backend: messagingThreads.backend,
+          externalThreadRef: messagingThreads.externalThreadRef,
+          parentMessageRef: messagingThreads.parentMessageRef,
+          state: messagingThreads.state,
+          createdAt: messagingThreads.createdAt,
+        })
+        .from(messagingThreads)
+        .where(eq(messagingThreads.issueId, issueId))
+        .limit(1);
+
+      if (!thread) {
+        res.json({ thread: null, channel: null, recentMessages: [] });
+        return;
+      }
+
+      const [channel] = await db
+        .select({
+          id: messagingChannels.id,
+          externalChannelRef: messagingChannels.externalChannelRef,
+          externalChannelName: messagingChannels.externalChannelName,
+          state: messagingChannels.state,
+        })
+        .from(messagingChannels)
+        .where(eq(messagingChannels.id, thread.channelId))
+        .limit(1);
+
+      const recentMessages = await db
+        .select({
+          id: messagingMessageRefs.id,
+          externalMessageRef: messagingMessageRefs.externalMessageRef,
+          authorAgentId: messagingMessageRefs.authorAgentId,
+          authorUserId: messagingMessageRefs.authorUserId,
+          createdByRunId: messagingMessageRefs.createdByRunId,
+          firstSeenAt: messagingMessageRefs.firstSeenAt,
+          editedAt: messagingMessageRefs.editedAt,
+          editCount: messagingMessageRefs.editCount,
+          deletedAt: messagingMessageRefs.deletedAt,
+          suppressedForWake: messagingMessageRefs.suppressedForWake,
+        })
+        .from(messagingMessageRefs)
+        .where(eq(messagingMessageRefs.threadId, thread.id))
+        .orderBy(desc(messagingMessageRefs.firstSeenAt))
+        .limit(10);
+
+      res.json({
+        thread,
+        channel: channel ?? null,
+        recentMessages,
+      });
     },
   );
 
