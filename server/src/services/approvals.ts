@@ -1,12 +1,63 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { approvalComments, approvals } from "@paperclipai/db";
+import { approvalComments, approvals, companyMemberships } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { dispatchInboxForApprovalRequest } from "../messaging/inbox.js";
+
+/**
+ * Best-effort inbox dispatch for every active board user (role owner/admin)
+ * in the company. Fire-and-forget — inbox failures never fail the approval
+ * write.
+ */
+async function dispatchInboxOnApproval(
+  db: Db,
+  created: typeof approvals.$inferSelect,
+): Promise<void> {
+  try {
+    const members = await db
+      .select({
+        principalId: companyMemberships.principalId,
+        membershipRole: companyMemberships.membershipRole,
+      })
+      .from(companyMemberships)
+      .where(
+        and(
+          eq(companyMemberships.companyId, created.companyId),
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.status, "active"),
+        ),
+      );
+    const approverUserIds = members
+      .filter((m) =>
+        m.membershipRole === "owner" ||
+        m.membershipRole === "admin" ||
+        m.membershipRole === null,
+      )
+      .map((m) => m.principalId);
+    const payload = (created.payload ?? {}) as Record<string, unknown>;
+    const summary = typeof payload.summary === "string"
+      ? payload.summary
+      : `${created.type} approval requested`;
+    const issueId = typeof payload.issueId === "string" ? payload.issueId : null;
+    for (const userId of approverUserIds) {
+      await dispatchInboxForApprovalRequest(db, {
+        companyId: created.companyId,
+        approverUserId: userId,
+        approvalId: created.id,
+        summary,
+        issueId,
+      });
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("approvalService: inbox dispatch failed", err);
+  }
+}
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
@@ -92,12 +143,16 @@ export function approvalService(db: Db) {
         .where(eq(approvals.id, id))
         .then((rows) => rows[0] ?? null),
 
-    create: (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) =>
-      db
+    create: async (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) => {
+      const [created] = await db
         .insert(approvals)
         .values({ ...data, companyId })
-        .returning()
-        .then((rows) => rows[0]),
+        .returning();
+      if (created) {
+        void dispatchInboxOnApproval(db, created);
+      }
+      return created;
+    },
 
     approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
       const { approval: updated, applied } = await resolveApproval(

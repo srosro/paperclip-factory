@@ -28,6 +28,7 @@ import { sidebarPreferenceRoutes } from "./routes/sidebar-preferences.js";
 import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { messagingSlackRoutes } from "./routes/messaging-slack.js";
+import { messagingInboxRoutes } from "./routes/messaging-inbox.js";
 import { llmRoutes } from "./routes/llms.js";
 import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
@@ -54,6 +55,7 @@ import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
 import { defaultSlackResolvers, initMessaging } from "./messaging/index.js";
+import { dispatchInboxForMention } from "./messaging/inbox.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -143,6 +145,18 @@ export async function createApp(
     slack: slackBackendConfigured
       ? defaultSlackResolvers(db, opts.storageService)
       : undefined,
+    onMessageCreated: async ({ companyId, issueId, refId, authorExternalRef, mentionedUserIds }) => {
+      if (mentionedUserIds.length === 0) return;
+      for (const userId of mentionedUserIds) {
+        void dispatchInboxForMention(db, {
+          companyId,
+          mentionedUserId: userId,
+          issueId,
+          fromDisplayName: authorExternalRef,
+          commentRefId: refId,
+        });
+      }
+    },
   });
 
   const app = express();
@@ -215,6 +229,7 @@ export async function createApp(
   api.use(inboxDismissalRoutes(db));
   api.use(instanceSettingsRoutes(db));
   api.use("/messaging/slack", messagingSlackRoutes(db));
+  api.use("/messaging", messagingInboxRoutes(db));
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = createPluginWorkerManager();
   const pluginRegistry = pluginRegistryService(db);
