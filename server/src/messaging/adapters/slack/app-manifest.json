@@ -1,0 +1,50 @@
+{
+  "display_information": {
+    "name": "Paperclip Factory",
+    "description": "Paperclip control plane - agents post to issue threads",
+    "background_color": "#000000"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Paperclip Factory",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "http://127.0.0.1:3100/api/messaging/slack/oauth/bot/callback",
+      "http://127.0.0.1:3100/api/messaging/slack/oauth/user/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "channels:read",
+        "channels:manage",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "chat:write",
+        "users:read",
+        "users:read.email",
+        "reactions:read",
+        "reactions:write",
+        "files:read",
+        "files:write"
+      ],
+      "user": [
+        "chat:write",
+        "im:history",
+        "im:write",
+        "groups:history",
+        "users:read",
+        "users.profile:read",
+        "reactions:write",
+        "files:read"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

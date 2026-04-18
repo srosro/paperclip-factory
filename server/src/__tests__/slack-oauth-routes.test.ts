@@ -291,7 +291,8 @@ describeIf("messaging slack oauth routes", () => {
       .get("/api/messaging/slack/oauth/user/callback")
       .query({ code: "AUTH_CODE", state });
     expect(res.status).toBe(302);
-    expect(res.header.location).toMatch(/slack_linked=1/);
+    expect(res.header.location).toMatch(/slack_linked=/);
+    expect(res.header.location).toMatch(/\/company\/settings\/messaging/);
 
     const identities = await db
       .select()

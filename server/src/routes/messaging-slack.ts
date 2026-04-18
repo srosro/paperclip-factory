@@ -466,7 +466,21 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
       });
     }
 
-    res.redirect(`/companies/${companyId}/agents/${agentId}?slack_linked=1`);
+    // Redirect back to the company-prefixed Messaging settings page so the
+    // operator lands where they started and can see the agent's state flip
+    // to active. The UI uses company-prefix routing (`/<ISSUE_PREFIX>/...`),
+    // not raw company uuids.
+    const [companyRow] = await db
+      .select({ issuePrefix: companiesTable.issuePrefix })
+      .from(companiesTable)
+      .where(eq(companiesTable.id, companyId))
+      .limit(1);
+    const prefix = companyRow?.issuePrefix ?? "";
+    res.redirect(
+      prefix
+        ? `/${encodeURIComponent(prefix)}/company/settings/messaging?slack_linked=${encodeURIComponent(agentId)}`
+        : `/company/settings/messaging?slack_linked=${encodeURIComponent(agentId)}`,
+    );
   });
 
   // ---------- Events API webhook ----------
