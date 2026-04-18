@@ -164,4 +164,8 @@ export const queryKeys = {
   adapters: {
     all: ["adapters"] as const,
   },
+  messaging: {
+    status: (companyId: string) => ["messaging", "status", companyId] as const,
+    inboxPrefs: (companyId: string) => ["messaging", "inbox-prefs", companyId] as const,
+  },
 };
