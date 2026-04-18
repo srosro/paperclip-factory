@@ -440,7 +440,14 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
         .limit(1);
       if (install) {
         companyId = install.companyId;
-        signingSecret = await getSigningSecretForCompany(db, install.companyId);
+        try {
+          signingSecret = await getSigningSecretForCompany(db, install.companyId);
+        } catch (err) {
+          logger.warn(
+            { err, companyId: install.companyId },
+            "slack events: failed to resolve per-install signing secret; falling back to env",
+          );
+        }
       }
     }
     // Fall back to env-level signing secret if no per-workspace one is stored.
@@ -519,7 +526,14 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
           )
           .limit(1);
         if (install) {
-          signingSecret = await getSigningSecretForCompany(db, install.companyId);
+          try {
+            signingSecret = await getSigningSecretForCompany(db, install.companyId);
+          } catch (err) {
+            logger.warn(
+              { err, companyId: install.companyId },
+              "slack interactivity: failed to resolve per-install signing secret; falling back to env",
+            );
+          }
         }
       }
       if (!signingSecret && env?.signingSecret) {
