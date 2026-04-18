@@ -248,6 +248,7 @@ function buildSlackContext(
     db: bootstrap.db,
     adapter,
     backend: "slack",
+    workspaceInstallId: install.id,
     issueUrlBase: bootstrap.issueUrlBase,
   });
   const ingestInboundFiles = bootstrap.storage
@@ -256,6 +257,7 @@ function buildSlackContext(
   const events = createEventsProcessor({
     db: bootstrap.db,
     backend: "slack",
+    workspaceInstallId: install.id,
     onMessageCreated: bootstrap.onMessageCreated,
     resolveMentions: (body) => resolveSlackMentions(bootstrap.db, body),
     ingestInboundFiles,

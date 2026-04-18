@@ -23,8 +23,13 @@ export const messagingMessageRefs = pgTable(
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
   },
   (table) => ({
-    backendRefUnique: uniqueIndex("messaging_message_refs_backend_ref_idx").on(
-      table.backend,
+    // Slack addresses a message by channel+ts. Since every thread lives in
+    // exactly one channel, (thread_id, external_message_ref) is the correct
+    // natural key: a given ts is unique inside a thread's channel. This
+    // replaces the old (backend, external_message_ref) which allowed two
+    // channels sharing a ts to collide onto one row.
+    threadRefUnique: uniqueIndex("messaging_message_refs_thread_ref_idx").on(
+      table.threadId,
       table.externalMessageRef,
     ),
     threadFirstSeenIdx: index("messaging_message_refs_thread_seen_idx").on(

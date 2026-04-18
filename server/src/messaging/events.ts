@@ -21,6 +21,12 @@ export interface EventsDeps {
   db: Db;
   backend: BackendKey;
   /**
+   * Workspace install this processor is scoped to. Required for the Slack
+   * backend — channel/identity lookups filter by it so rows never bleed
+   * across workspaces. Null for the fake adapter (tests/dev).
+   */
+  workspaceInstallId?: string | null;
+  /**
    * Fired after a new-message event is persisted as a ref row, only when
    * the ref's suppressedForWake flag is false.
    */
@@ -112,7 +118,7 @@ async function handleNewMessage(
   if (!channel) return; // not one of ours
 
   const threadRef = event.threadRef ?? event.messageRef;
-  const thread = await loadThreadByExternal(deps, threadRef);
+  const thread = await loadThreadByExternal(deps, channel.id, threadRef);
   if (!thread) return; // either top-level message or a thread we don't track
 
   if (thread.state === "locked") return; // thread is locked; don't record or wake
@@ -131,7 +137,7 @@ async function handleNewMessage(
     })
     .onConflictDoNothing({
       target: [
-        messagingMessageRefs.backend,
+        messagingMessageRefs.threadId,
         messagingMessageRefs.externalMessageRef,
       ],
     })
@@ -183,6 +189,10 @@ async function handleEdit(
   deps: EventsDeps,
   event: Extract<MessagingEvent, { kind: "message_changed" }>,
 ) {
+  const channel = await loadChannelByExternal(deps, event.channelRef);
+  if (!channel) return;
+  // Update the row identified by (channel's thread, external_message_ref). A
+  // message's (thread_id, external_message_ref) uniquely identifies one row.
   await deps.db
     .update(messagingMessageRefs)
     .set({
@@ -191,8 +201,11 @@ async function handleEdit(
     })
     .where(
       and(
-        eq(messagingMessageRefs.backend, deps.backend),
         eq(messagingMessageRefs.externalMessageRef, event.messageRef),
+        sql`${messagingMessageRefs.threadId} IN (
+          SELECT id FROM ${messagingThreads}
+          WHERE ${messagingThreads.channelId} = ${channel.id}
+        )`,
       ),
     );
 }
@@ -201,13 +214,18 @@ async function handleDelete(
   deps: EventsDeps,
   event: Extract<MessagingEvent, { kind: "message_deleted" }>,
 ) {
+  const channel = await loadChannelByExternal(deps, event.channelRef);
+  if (!channel) return;
   await deps.db
     .update(messagingMessageRefs)
     .set({ deletedAt: event.deletedAt })
     .where(
       and(
-        eq(messagingMessageRefs.backend, deps.backend),
         eq(messagingMessageRefs.externalMessageRef, event.messageRef),
+        sql`${messagingMessageRefs.threadId} IN (
+          SELECT id FROM ${messagingThreads}
+          WHERE ${messagingThreads.channelId} = ${channel.id}
+        )`,
       ),
     );
 }
@@ -216,20 +234,27 @@ async function handleReaction(
   deps: EventsDeps,
   event: Extract<MessagingEvent, { kind: "reaction_added" | "reaction_removed" }>,
 ) {
+  const channel = await loadChannelByExternal(deps, event.channelRef);
+  if (!channel) return;
   const [row] = await deps.db
     .select()
     .from(messagingMessageRefs)
+    .innerJoin(
+      messagingThreads,
+      eq(messagingThreads.id, messagingMessageRefs.threadId),
+    )
     .where(
       and(
-        eq(messagingMessageRefs.backend, deps.backend),
         eq(messagingMessageRefs.externalMessageRef, event.messageRef),
+        eq(messagingThreads.channelId, channel.id),
       ),
     )
     .limit(1);
   if (!row) return;
 
+  const ref = row.messaging_message_refs;
   const current: Record<string, string[]> =
-    (row.reactions as Record<string, string[]> | null) ?? {};
+    (ref.reactions as Record<string, string[]> | null) ?? {};
   const reactors = new Set(current[event.emoji] ?? []);
   if (event.kind === "reaction_added") {
     reactors.add(event.reactorExternalRef);
@@ -244,30 +269,40 @@ async function handleReaction(
   await deps.db
     .update(messagingMessageRefs)
     .set({ reactions: current })
-    .where(eq(messagingMessageRefs.id, row.id));
+    .where(eq(messagingMessageRefs.id, ref.id));
 }
 
 async function loadChannelByExternal(deps: EventsDeps, externalRef: string) {
+  // Prefer workspace-scoped lookup for Slack; fall back to backend-scoped
+  // lookup for the fake adapter (tests/dev).
+  const whereClauses = deps.workspaceInstallId
+    ? and(
+        eq(messagingChannels.workspaceInstallId, deps.workspaceInstallId),
+        eq(messagingChannels.externalChannelRef, externalRef),
+      )
+    : and(
+        eq(messagingChannels.backend, deps.backend),
+        eq(messagingChannels.externalChannelRef, externalRef),
+      );
   const rows = await deps.db
     .select()
     .from(messagingChannels)
-    .where(
-      and(
-        eq(messagingChannels.backend, deps.backend),
-        eq(messagingChannels.externalChannelRef, externalRef),
-      ),
-    )
+    .where(whereClauses)
     .limit(1);
   return rows[0];
 }
 
-async function loadThreadByExternal(deps: EventsDeps, externalRef: string) {
+async function loadThreadByExternal(
+  deps: EventsDeps,
+  channelId: string,
+  externalRef: string,
+) {
   const rows = await deps.db
     .select()
     .from(messagingThreads)
     .where(
       and(
-        eq(messagingThreads.backend, deps.backend),
+        eq(messagingThreads.channelId, channelId),
         eq(messagingThreads.externalThreadRef, externalRef),
       ),
     )
@@ -276,15 +311,19 @@ async function loadThreadByExternal(deps: EventsDeps, externalRef: string) {
 }
 
 async function loadIdentityByExternal(deps: EventsDeps, externalRef: string) {
+  const whereClauses = deps.workspaceInstallId
+    ? and(
+        eq(messagingIdentities.workspaceInstallId, deps.workspaceInstallId),
+        eq(messagingIdentities.externalUserRef, externalRef),
+      )
+    : and(
+        eq(messagingIdentities.backend, deps.backend),
+        eq(messagingIdentities.externalUserRef, externalRef),
+      );
   const rows = await deps.db
     .select()
     .from(messagingIdentities)
-    .where(
-      and(
-        eq(messagingIdentities.backend, deps.backend),
-        eq(messagingIdentities.externalUserRef, externalRef),
-      ),
-    )
+    .where(whereClauses)
     .limit(1);
   return rows[0];
 }

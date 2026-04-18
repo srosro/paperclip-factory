@@ -149,12 +149,17 @@ describeIf("messaging events processor", () => {
 
     const [refBefore] = await db.select().from(messagingMessageRefs);
     expect(refBefore!.editCount).toBe(0);
+    const [channelRow] = await db
+      .select()
+      .from(messagingChannels)
+      .innerJoin(messagingThreads, eq(messagingThreads.channelId, messagingChannels.id))
+      .where(eq(messagingThreads.id, refBefore!.threadId));
 
     const editEvent: MessagingEvent = {
       kind: "message_changed",
       externalEventId: "EV_edit",
       messageRef: refBefore!.externalMessageRef,
-      channelRef: "C_ignored",
+      channelRef: channelRow!.messaging_channels.externalChannelRef,
       bodyRaw: "v2",
       editedAt: new Date(),
     };
@@ -182,12 +187,17 @@ describeIf("messaging events processor", () => {
     await new Promise((r) => setTimeout(r, 10));
 
     const [ref] = await db.select().from(messagingMessageRefs);
+    const [delChannel] = await db
+      .select()
+      .from(messagingChannels)
+      .innerJoin(messagingThreads, eq(messagingThreads.channelId, messagingChannels.id))
+      .where(eq(messagingThreads.id, ref!.threadId));
 
     await events.handle({
       kind: "message_deleted",
       externalEventId: "EV_del",
       messageRef: ref!.externalMessageRef,
-      channelRef: "C_ignored",
+      channelRef: delChannel!.messaging_channels.externalChannelRef,
       deletedAt: new Date(),
     });
 
@@ -211,11 +221,16 @@ describeIf("messaging events processor", () => {
     });
     await new Promise((r) => setTimeout(r, 10));
     const [ref] = await db.select().from(messagingMessageRefs);
+    const [reactionChannel] = await db
+      .select()
+      .from(messagingChannels)
+      .innerJoin(messagingThreads, eq(messagingThreads.channelId, messagingChannels.id))
+      .where(eq(messagingThreads.id, ref!.threadId));
 
     const base = {
       externalEventId: "",
       messageRef: ref!.externalMessageRef,
-      channelRef: "C_ignored",
+      channelRef: reactionChannel!.messaging_channels.externalChannelRef,
       emoji: "+1",
       at: new Date(),
     };

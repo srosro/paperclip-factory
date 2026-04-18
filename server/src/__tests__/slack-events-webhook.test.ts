@@ -127,15 +127,18 @@ async function seedWorkspaceAndThread(
     .returning();
 
   const teamId = "T_EVENTS";
-  await db.insert(messagingWorkspaceInstall).values({
-    companyId,
-    backend: "slack",
-    externalWorkspaceRef: teamId,
-    botUserRef: "U_BOT",
-    botTokenSecretId: botSecret!.id,
-    signingSecretId: signingSecret!.id,
-    state: "active",
-  });
+  const [install] = await db
+    .insert(messagingWorkspaceInstall)
+    .values({
+      companyId,
+      backend: "slack",
+      externalWorkspaceRef: teamId,
+      botUserRef: "U_BOT",
+      botTokenSecretId: botSecret!.id,
+      signingSecretId: signingSecret!.id,
+      state: "active",
+    })
+    .returning();
   await db.insert(messagingCompanyConfig).values({
     companyId,
     activeBackend: "slack",
@@ -147,6 +150,7 @@ async function seedWorkspaceAndThread(
     .values({
       companyId,
       backend: "slack",
+      workspaceInstallId: install!.id,
       purpose: "project",
       projectId: project!.id,
       externalChannelRef: channelExternalRef,
@@ -167,6 +171,7 @@ async function seedWorkspaceAndThread(
     companyId,
     agentId: agent!.id,
     backend: "slack",
+    workspaceInstallId: install!.id,
     externalUserRef: agentExternalUserRef,
     state: "active",
   });

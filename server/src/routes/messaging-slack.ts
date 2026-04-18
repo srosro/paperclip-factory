@@ -245,6 +245,7 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
       )
       .limit(1);
 
+    let workspaceInstallId: string;
     if (existing) {
       await db
         .update(messagingWorkspaceInstall)
@@ -258,19 +259,24 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
           updatedAt: new Date(),
         })
         .where(eq(messagingWorkspaceInstall.id, existing.id));
+      workspaceInstallId = existing.id;
     } else {
-      await db.insert(messagingWorkspaceInstall).values({
-        companyId,
-        backend: "slack",
-        externalWorkspaceRef: exch.team.id,
-        workspaceName: exch.team.name ?? null,
-        botUserRef: exch.bot_user_id,
-        botTokenSecretId,
-        signingSecretId,
-        installedByUserId:
-          req.actor.type === "board" ? req.actor.userId ?? null : null,
-        state: "active",
-      });
+      const [inserted] = await db
+        .insert(messagingWorkspaceInstall)
+        .values({
+          companyId,
+          backend: "slack",
+          externalWorkspaceRef: exch.team.id,
+          workspaceName: exch.team.name ?? null,
+          botUserRef: exch.bot_user_id,
+          botTokenSecretId,
+          signingSecretId,
+          installedByUserId:
+            req.actor.type === "board" ? req.actor.userId ?? null : null,
+          state: "active",
+        })
+        .returning({ id: messagingWorkspaceInstall.id });
+      workspaceInstallId = inserted!.id;
     }
 
     // Auto-discover inbox identities: match Slack workspace users by email
@@ -279,6 +285,7 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
     try {
       const result = await autoDiscoverInboxIdentities(db, {
         companyId,
+        workspaceInstallId,
         botToken: exch.access_token,
       });
       logger.info(
@@ -368,6 +375,21 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
 
     const externalUserRef = exch.authed_user.id;
 
+    // Resolve workspace install so the identity records the workspace linkage
+    // (required for workspace-aware natural keys).
+    const [install] = await db
+      .select()
+      .from(messagingWorkspaceInstall)
+      .where(
+        and(
+          eq(messagingWorkspaceInstall.backend, "slack"),
+          eq(messagingWorkspaceInstall.companyId, companyId),
+          eq(messagingWorkspaceInstall.state, "active"),
+        ),
+      )
+      .limit(1);
+    const workspaceInstallId = install?.id ?? null;
+
     // Reject if another identity in this company already holds this slack
     // user id, attached to a different principal.
     const [collision] = await db
@@ -409,6 +431,7 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
         .update(messagingIdentities)
         .set({
           externalUserRef,
+          workspaceInstallId,
           authBlobSecretId: userTokenSecretId,
           state: "active",
           lastRefreshedAt: new Date(),
@@ -420,6 +443,7 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
         companyId,
         agentId,
         backend: "slack",
+        workspaceInstallId,
         externalUserRef,
         authBlobSecretId: userTokenSecretId,
         state: "active",

@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 import { projects } from "./projects.js";
 import { authUsers } from "./auth.js";
+import { messagingWorkspaceInstall } from "./messaging_workspace_install.js";
 
 export const messagingChannels = pgTable(
   "messaging_channels",
@@ -10,6 +11,14 @@ export const messagingChannels = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id),
     backend: text("backend").notNull(),
+    /**
+     * Workspace install that owns this channel. Required for Slack rows so
+     * every channel traces unambiguously to one workspace; nullable for the
+     * fake adapter (tests/dev).
+     */
+    workspaceInstallId: uuid("workspace_install_id").references(
+      () => messagingWorkspaceInstall.id,
+    ),
     purpose: text("purpose").notNull(),  // 'project' | 'inbox' | 'ad_hoc'
     projectId: uuid("project_id").references(() => projects.id),
     userId: text("user_id").references(() => authUsers.id),
@@ -27,7 +36,15 @@ export const messagingChannels = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    backendRefUnique: uniqueIndex("messaging_channels_backend_ref_idx").on(
+    // Slack identity: (workspace_install_id, external_channel_ref) is the
+    // natural key. Partial so fake-adapter rows (workspace_install_id NULL)
+    // don't conflict across companies.
+    workspaceChannelUnique: uniqueIndex("messaging_channels_workspace_ref_idx")
+      .on(table.workspaceInstallId, table.externalChannelRef)
+      .where(sql`workspace_install_id IS NOT NULL`),
+    // Company-scoped uniqueness for fake rows and as a backstop for Slack.
+    companyChannelUnique: uniqueIndex("messaging_channels_company_ref_idx").on(
+      table.companyId,
       table.backend,
       table.externalChannelRef,
     ),

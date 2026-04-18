@@ -17,6 +17,10 @@ export const messagingThreads = pgTable(
   },
   (table) => ({
     issueUnique: uniqueIndex("messaging_threads_issue_idx").on(table.issueId),
-    channelIdx: index("messaging_threads_channel_idx").on(table.channelId),
+    // Channel-aware natural key: Slack thread_ts is unique within a channel.
+    channelThreadUnique: uniqueIndex("messaging_threads_channel_thread_idx").on(
+      table.channelId,
+      table.externalThreadRef,
+    ),
   }),
 );

@@ -28,6 +28,12 @@ export interface RouterDeps {
    */
   adapter: MessagingAdapter;
   backend: BackendKey;
+  /**
+   * Workspace install this router is scoped to. Required for the Slack backend
+   * so channel/identity rows record the correct workspace linkage; null for
+   * the fake adapter (tests/dev).
+   */
+  workspaceInstallId?: string | null;
   channelNamePrefix?: string;
   /**
    * Optional — public-facing base URL for issue links embedded in thread cards.
@@ -148,6 +154,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
   const prefix = deps.channelNamePrefix ?? "proj-";
   const urlBase = deps.issueUrlBase ?? "";
   const adapter = deps.adapter;
+  const workspaceInstallId = deps.workspaceInstallId ?? null;
 
   async function loadIdentity(args: {
     companyId: string;
@@ -247,6 +254,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
           .values({
             companyId,
             backend: deps.backend,
+            workspaceInstallId,
             purpose: "project",
             projectId,
             externalChannelRef: created.externalRef,
@@ -264,6 +272,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         .from(messagingChannels)
         .where(
           and(
+            eq(messagingChannels.companyId, companyId),
             eq(messagingChannels.backend, deps.backend),
             eq(messagingChannels.externalChannelRef, adhocExternalRef),
           ),
@@ -282,6 +291,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         .values({
           companyId,
           backend: deps.backend,
+          workspaceInstallId,
           purpose: "ad_hoc",
           externalChannelRef: created.externalRef,
           externalChannelName: created.name,
@@ -397,7 +407,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         })
         .onConflictDoUpdate({
           target: [
-            messagingMessageRefs.backend,
+            messagingMessageRefs.threadId,
             messagingMessageRefs.externalMessageRef,
           ],
           set: {

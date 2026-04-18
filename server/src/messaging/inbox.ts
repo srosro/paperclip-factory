@@ -163,6 +163,11 @@ export const realSlackInboxApi: SlackInboxApi = {
 export interface AutoDiscoverArgs {
   companyId: string;
   botToken: string;
+  /**
+   * Workspace install id for the Slack workspace. Stamped onto newly inserted
+   * identities so they're workspace-scoped.
+   */
+  workspaceInstallId?: string | null;
   api?: SlackInboxApi;
 }
 
@@ -220,6 +225,7 @@ export async function autoDiscoverInboxIdentities(
       companyId: args.companyId,
       userId,
       backend: BACKEND,
+      workspaceInstallId: args.workspaceInstallId ?? null,
       externalUserRef: slackUser.id,
       state: "active",
       authBlobSecretId: null,
