@@ -2303,12 +2303,18 @@ export function issueService(db: Db) {
         body = msgs.find((m) => m.refId === refRow.id)?.body ?? "";
       }
 
-      // Soft-delete by marking deletedAt on the ref. UI/queue treats this as
-      // "removed" identically to the legacy hard delete.
+      // Cancel = suppress, not delete. Slack owns the message body; we
+      // leave the Slack thread intact so humans see what was posted and
+      // only flip suppressedForWake so Paperclip side effects (agent
+      // wakes, inbox DMs, run-linked comment satisfaction) are skipped.
+      // Metadata records the cancellation for the diagnose endpoint.
       await db.transaction(async (tx) => {
         await tx
           .update(messagingMessageRefs)
-          .set({ deletedAt: new Date() })
+          .set({
+            suppressedForWake: true,
+            metadata: sql`COALESCE(${messagingMessageRefs.metadata}, '{}'::jsonb) || jsonb_build_object('cancelledAt', ${new Date().toISOString()})`,
+          })
           .where(eq(messagingMessageRefs.id, commentId));
         await tx
           .update(issues)
