@@ -16,10 +16,23 @@ Make Slack the single, authoritative surface for all Paperclip communication. Ev
 ## High-level shape
 
 - **Upstream feature**, not a fork. Lives in mainline Paperclip, off by default per company, on when `messaging_company_config.activeBackend` is set.
-- **Pure "backend is the record":** comment bodies are not stored in Paperclip. The only local artifact is a derived, rebuildable search/display index.
+- **Domain-specific canonicality.** Slack owns conversational message bodies, edits, deletes, and reactions. Paperclip owns issue state, approvals, run ↔ message linkage, wake routing, channel membership, and everything else orchestration-related. See the **field ownership** table below.
+- **No local message bodies.** `messaging_message_refs` stores pointers + Paperclip-owned orchestration metadata (run linkage, edit/delete timestamps, wake suppression) but never body text. Reads fetch live from Slack via the adapter. A derived search index may land in a later phase if rate-limit pain shows up; not in MVP.
 - **Core interface + built-in Slack:** `MessagingAdapter` is a first-class core concept alongside `AgentAdapter`. Slack ships as a built-in adapter. Future backends ride the plugin system.
 - **In-process, fail-fast:** adapter lives inside the Paperclip server process. Slack API failure propagates as a normal API error; no outbox, no durable queue. Slack outage = Paperclip comments paused, by design.
 - **User-token-per-agent identity:** each agent is a real Slack user (paid seat, real email). One Slack app, installed once with bot scopes, installed once per agent with user scopes. Agents post using their user tokens — native Slack identity, native `@mentions`, native DMs.
+
+### Field ownership
+
+| Field | Owner | Notes |
+|---|---|---|
+| Message body, edits, deletes, reactions | **Slack** | Paperclip never stores body text; edits/deletes reflect in `messaging_message_refs` timestamps only |
+| Issue title, description, status, assignee, priority, labels | **Paperclip** | Slack thread card is a projection; editing Paperclip updates the card |
+| Approval decision state | **Paperclip** | Slack buttons (Phase 1.5) are a control surface; state lives in `approvals` |
+| Run ↔ message linkage, wake suppression | **Paperclip** | First-class columns on `messaging_message_refs` |
+| Channel membership | **Paperclip, via adapter** | Bot is sole channel manager; humans don't invite/kick manually |
+| Attachments (file bytes) | **Slack** (primary) + Paperclip blob store (cached on ingest) | See Attachments section |
+| Feedback votes on agent-authored messages | **Paperclip** | Targets `messaging_message_refs.id`; see Feedback section |
 
 ## Architecture
 
@@ -30,9 +43,8 @@ server/src/messaging/
 ├── types.ts                   # MessagingAdapter interface, capability flags, ref types
 ├── router.ts                  # backend-agnostic routing; writes pointer rows
 ├── registry.ts                # adapter registration
-├── events.ts                  # inbound event → wake dispatch; only writer to search index
+├── events.ts                  # inbound event → ref updates → wake dispatch
 ├── provisioning.ts            # channel/identity provisioning orchestration
-├── search-index.ts            # derived-index read API, rebuild helpers
 └── adapters/
     ├── fake/                   # in-memory adapter for tests and local dev
     │   └── adapter.ts
@@ -51,8 +63,9 @@ server/src/messaging/
 ### Module boundaries
 
 - `services/issues.ts` comment path calls `messaging.router.postMessage()` instead of writing to `issue_comments`.
-- `messaging.router` is the only writer to `messaging_threads` and `messaging_message_refs`.
-- `messaging.events` is the only writer to `messaging_message_index` (the derived search projection).
+- `messaging.router` is the only writer to `messaging_threads` and the initial insert to `messaging_message_refs`.
+- `messaging.events` is the only writer to `messaging_message_refs` edit/delete/reaction timestamps.
+- `messaging.router` is the only module that invites/removes channel members (bot is sole channel manager in Slack — humans cannot manually alter membership; enforced by Slack role config).
 - `messaging.adapters.slack` is the only module importing `@slack/web-api` / `@slack/bolt`. Core contains zero Slack-specific code.
 
 ### Adapter interface
@@ -89,7 +102,6 @@ interface CapabilityFlags {
   supportsEditing: boolean;
   supportsReactions: boolean;
   supportsButtons: boolean;
-  supportsSearch: boolean;            // if false, core enables derived index
   supportsFileUpload: boolean;
   supportsThreadLock: boolean;        // native; simulated by core if false
   requiresUserAuthPerIdentity: boolean;
@@ -104,7 +116,6 @@ interface CapabilityFlags {
   supportsEditing: true,
   supportsReactions: true,
   supportsButtons: true,
-  supportsSearch: false,                 // derived index enabled
   supportsFileUpload: true,
   supportsThreadLock: false,             // soft-locked via messaging_threads.state
   requiresUserAuthPerIdentity: true,
@@ -181,25 +192,22 @@ messaging_identities
   UNIQUE (companyId, backend, userId)  WHERE userId  IS NOT NULL
 
 messaging_message_refs
-  id                     uuid PK       -- stable Paperclip UUID for FKs
+  id                     uuid PK       -- stable Paperclip UUID for FKs (feedback, attachments, etc.)
   threadId               uuid FK messaging_threads
   backend                text
   externalMessageRef     text
   authorAgentId          uuid FK agents   NULLABLE
   authorUserId           uuid FK users    NULLABLE
+  createdByRunId         uuid FK heartbeat_runs NULLABLE  -- orchestration: which run produced this
   firstSeenAt            timestamptz
-  metadata               jsonb NULLABLE  -- X-Paperclip-Run-Id, etc.
+  editedAt               timestamptz NULLABLE
+  editCount              integer NOT NULL DEFAULT 0
+  deletedAt              timestamptz NULLABLE
+  suppressedForWake      boolean NOT NULL DEFAULT false   -- replaces "cancel queued comment"
+  metadata               jsonb NULLABLE                    -- open-ended audit only
   UNIQUE (backend, externalMessageRef)
   INDEX (threadId, firstSeenAt)
-
-messaging_message_index            -- derived, rebuildable from adapter
-  messageRefId           uuid PK FK messaging_message_refs ON DELETE CASCADE
-  threadId               uuid FK messaging_threads
-  companyId              uuid FK companies
-  body                   text
-  bodyTsv                tsvector GENERATED ALWAYS AS (to_tsvector('english', body)) STORED
-  capturedAt             timestamptz
-  GIN INDEX ON bodyTsv
+  INDEX (createdByRunId) WHERE createdByRunId IS NOT NULL
 
 messaging_events_inbox             -- webhook idempotency
   id                     uuid PK
@@ -228,11 +236,18 @@ messaging_company_config
 
 - `approval_comments` stays. Own table, own bodies, separate lifecycle. Phase 2 may move approval chatter into the issue's Slack thread; out of scope for MVP.
 
-### Derived index invariants
+### Feedback votes FK shift
 
-- Only `messaging/events.ts` writes to `messaging_message_index`. Enforced by module boundary.
-- `messaging_message_index` is drop-and-rebuildable via `adapter.getThreadMessages()` over all `messaging_threads`.
-- No other reader or writer may persist messages outside `messaging_message_index`.
+`feedback_votes` today targets agent-authored `issue_comments.id`. After migration, the target is `messaging_message_refs.id` — same semantic (vote on an agent-authored message), new target PK. One column rename in the feedback service and schema; no behavioral change for Paperclip-UI voting.
+
+Slack-native reactions on the same message (e.g. 👍 in a thread) are *not* automatically mapped to `feedback_votes` in Phase 1 — reactions land in `messaging_message_refs` as opaque updates. Reaction → feedback bridging is a Phase 1.5 nice-to-have.
+
+### Orchestration metadata semantics
+
+- `createdByRunId`: populated when a post originates from an agent heartbeat. Preserves the existing run-linkage semantic today enforced by `heartbeat.ts` (missing-comment check) and `feedback.ts` (targeting agent-authored runs).
+- `suppressedForWake`: replaces today's "cancel queued comment" semantic. With Slack as the record, the message itself stays posted; Paperclip opts out of dispatching wakes for it. The comment-cancel API repurposes to flip this flag.
+- `editedAt` / `editCount`: bumped by `events.ts` on inbound `message_changed` events. Bodies are not captured; the ref acts as a durable receipt that an edit happened.
+- `deletedAt`: set on inbound `message_deleted` events. Ref row preserved (do not cascade-delete dependent feedback/attachment rows). Listing paths filter out soft-deleted refs by default.
 
 ## Core flows
 
@@ -242,20 +257,20 @@ messaging_company_config
 Agent heartbeat → POST /api/issues/:id/comments
   → routes/issues.ts
     → services/issues.ts postComment()
-      → messaging.router.postMessage({ issueId, authorAgentId, body })
-        1. load messaging_threads row (create via 3.4 lifecycle if missing)
+      → messaging.router.postMessage({ issueId, authorAgentId, body, runId })
+        1. load messaging_threads row (create via lifecycle if missing)
         2. load author messaging_identities + user token from secret store
         3. adapter.postMessage({ threadRef, channelRef, authorIdentity, body })
              Slack: chat.postMessage (user token), thread_ts=<thread>
              429 → in-memory retry ×3 (2s backoff)
              5xx → in-memory retry ×3 (500ms/1s/2s)
              fail → throw MessagingBackendUnavailable
-        4. insert messaging_message_refs pointer row
+        4. insert messaging_message_refs row with createdByRunId=<runId>
         5. return { id }
   → 201 Created { id, createdAt }
 ```
 
-The write does not succeed unless Slack acknowledges. Index population is deferred to the inbound event echo (single-writer rule on the index).
+The write does not succeed unless Slack acknowledges. Body is not stored — subsequent reads go live to Slack via the adapter.
 
 ### Inbound event (user or agent echo)
 
@@ -270,13 +285,17 @@ Slack → POST /api/messaging/slack/events  (signed)
   → messaging/events.ts handleMessage():
     1. resolve channel + thread via pointer tables; skip if unknown
     2. resolve author via messaging_identities
-    3. upsert messaging_message_refs (idempotent on externalMessageRef)
-    4. upsert messaging_message_index (body in canonical GFM form)
-    5. parse mentions → fire wakes via issue-assignment-wakeup.ts
+    3. branch on event kind:
+         - new message: upsert messaging_message_refs (idempotent on externalMessageRef)
+         - message_changed: set editedAt=now, editCount++
+         - message_deleted: set deletedAt=now
+         - reaction_added / reaction_removed: update ref (optional reaction summary jsonb)
+    4. if ref has suppressedForWake=true → skip wake dispatch
+       else parse mentions → fire wakes via issue-assignment-wakeup.ts
          - issue_commented for thread assignee
          - issue_comment_mentioned for each mentioned agent
-    6. emit realtime event to UI (existing live-events-ws.ts)
-    7. mark messaging_events_inbox.processedAt
+    5. emit realtime event to UI (existing live-events-ws.ts) — UI fetches body live from Slack
+    6. mark messaging_events_inbox.processedAt
 ```
 
 Wake dispatch is the existing pipeline. Event source changed; semantics unchanged.
@@ -286,18 +305,20 @@ Wake dispatch is the existing pipeline. Event source changed; semantics unchange
 ```
 Agent heartbeat → GET /api/issues/:id/comments?after=<refId>
   → messaging.router.getThreadMessages({ issueId, afterRefId? })
-    - load recent messaging_message_refs (paginated, ordered firstSeenAt)
-    - join messaging_message_index for body
-    - return canonical Message[]
+    1. load recent messaging_message_refs (paginated, ordered firstSeenAt, excludes deleted)
+    2. adapter.getThreadMessages(threadRef) — live Slack call
+    3. zip bodies onto refs by externalMessageRef
+    4. return canonical Message[]
 ```
 
-**Agents read from the derived index, not live from Slack.** The index is populated by inbound events within ~100ms. Heartbeats are eventually-consistent with Slack; wake responsiveness is driven by inbound event processing, not by read freshness.
+**Reads go live to Slack via the adapter.** Paperclip holds no body text. The router returns ref metadata (author, createdByRunId, timestamps) joined with bodies pulled from Slack on each call.
 
-Live Slack reads (`adapter.getThreadMessages`) remain available for: index rebuild, admin debug, future adapters without inbound events. Not on the hot path.
+Rate-limit budget: `conversations.replies` is Tier 3 (~50 req/min per method per workspace). For small companies (≤10 agents heartbeating every few minutes), well within quota. If/when pain shows up, a derived index lands as an adapter capability in a later phase and the read path silently switches to index-first with Slack fallback. MVP ships without it.
 
 ### Channel / thread lifecycle
 
 - **Channel creation:** lazy on first issue in a project. `adapter.createChannel({ name, purpose: 'project' })`. Name normalization: lowercase, kebab-case, ASCII only, prefixed with `config.channelNamePrefix` (default `'proj-'`), truncated to 80 chars to fit Slack's channel-name limit, collisions resolved by suffixing `-2`, `-3`. Bot auto-joins. Member agents auto-invited via their user tokens.
+- **Channel membership (ACL rule):** Paperclip is authoritative. The router invites/removes members based on issue assignments, @-mentions, and project membership. The bot is configured as the channel's sole channel-manager (Slack role) so non-bot users cannot manually invite or kick. Humans who need access are added by the router when Paperclip recognizes them as stakeholders.
 - **Thread creation:** lazy on first comment. Bot posts a Block Kit issue-card as the thread parent. `messaging_threads` row recorded.
 - **Issue card updates:** on status/assignee/title change, `messaging.router.onIssueStateChange(issue)` → `adapter.editMessage(parentMessageRef, newBlocks)` using the bot token. Fire-and-forget; edit failure logs but does not roll back state.
 - **Archive:** Phase 2 (auto-archive on project done). Manual only for Phase 1.
@@ -364,7 +385,7 @@ Each agent is a real Slack user.
 
 **Block Kit used for structured content:**
 - Issue card (thread parent).
-- Approval requests (with action buttons).
+- Approval requests (Phase 1.5 — see Approvals UX).
 
 Normal comments remain text-only (mrkdwn).
 
@@ -375,27 +396,27 @@ Normal comments remain text-only (mrkdwn).
 
 ### Approvals UX
 
-Primary: Block Kit buttons in the issue's Slack thread.
+**MVP (Phase 1):** approvals continue to work via the Paperclip UI exactly as today. When an approval is created, the bot posts a notification to the issue's Slack thread: `⚠ Approval requested — <summary>. Decide in Paperclip: <link>`. No interactive buttons in MVP.
+
+**Phase 1.5:** Block Kit buttons embedded in the approval notification.
 
 ```
-Slack message posted to issue thread:
-  ⚠ Approval requested
-  <summary, recommended action, risks>
-  [ Approve ]  [ Deny ]
+⚠ Approval requested
+<summary, recommended action, risks>
+[ Approve ]  [ Deny ]
 ```
 
-Button click → `POST /api/messaging/slack/interactivity` → signature verified → decision mapped to existing approvals service. Message updated in place with outcome. Follow-up posted to thread.
+Button click → `POST /api/messaging/slack/interactivity` → signature verified → decision mapped to existing approvals service. Message updated in place with outcome. Follow-up posted to thread. `action_id` encodes `{approvalId, decision}`. Permission check against Paperclip roles before accepting.
 
-`action_id` encodes `{approvalId, decision}`. Permission check against Paperclip roles before accepting.
-
-Comment-as-`/approve` fallback deferred to Phase 2.
+**Phase 2:** comment-as-`/approve` fallback and slash commands.
 
 ### Attachments
 
-Phase 1.5 scope.
+Phase 1 scope — attachments work today in Paperclip, so shipping MVP without them would be a regression.
 
-- Outbound: `adapter.postMessageWithFile` → Slack `files.getUploadURLExternal` + `files.completeUploadExternal`. `messaging_message_refs` records Slack file ID.
-- Inbound: user attaches a file in Slack → adapter downloads via user token → stores in Paperclip blob store → registers `issue_attachments` row FK'd to new `messaging_message_refs.id`.
+- **Outbound:** agent comment with an attachment ref → `adapter.postMessageWithFile` → Slack `files.getUploadURLExternal` + `files.completeUploadExternal`. `messaging_message_refs` records the Slack file ID alongside the post. Paperclip blob store remains the canonical store for agent-uploaded bytes (the adapter uploads a copy to Slack for in-thread display).
+- **Inbound:** user attaches a file in Slack → events.ts adapter-downloads via user token → stores in Paperclip blob store → registers `issue_attachments` row FK'd to the new `messaging_message_refs.id`.
+- **Mixed ownership:** file bytes live in both places (Slack for display, Paperclip for portability/API). Slack is primary for in-thread rendering; Paperclip copy is how `/api/.../attachments/:id/content` continues to serve.
 
 ### Issue card
 
@@ -414,9 +435,9 @@ Edits triggered by `messaging.router.onIssueStateChange(issue)` on state changes
 
 ### Realtime UI
 
-- `messaging/events.ts` emits the canonical realtime event shape after upserting the index row.
+- `messaging/events.ts` emits the canonical realtime event shape after writing the ref row.
 - UI subscribes to the same `issue.comment.created` event; no UI refactor.
-- `GET /api/issues/:id/comments` contract unchanged — serves from the index.
+- `GET /api/issues/:id/comments` contract unchanged — serves refs from Postgres + bodies live from Slack via adapter.
 
 ## `#paperclip-inbox` (per-human digest)
 
@@ -514,13 +535,11 @@ No silent fallbacks. Fresh instance requires explicit setup.
 Reuses existing `telemetry.ts`.
 
 - Counters: `messaging.post.success`, `messaging.post.failure{code}`, `messaging.event.received{kind}`, `messaging.event.dedup_hit`, `messaging.wake.dispatched{reason}`.
-- Histograms: `messaging.post.latency_ms`, `messaging.event.process_latency_ms`, `messaging.search.latency_ms`.
+- Histograms: `messaging.post.latency_ms`, `messaging.event.process_latency_ms`, `messaging.read.latency_ms`.
 
 ### Admin debug endpoints
 
-- `GET /api/messaging/diagnose/:issueId` — thread ref, last 10 message refs, index hit count, last adapter API status.
-- `POST /api/messaging/reindex/:issueId` — drop + repopulate index for that thread from adapter.
-- `POST /api/messaging/reindex-all` — company-scoped; rate-limit-aware.
+- `GET /api/messaging/diagnose/:issueId` — thread ref, last 10 message refs, last adapter API status.
 
 ## Testing strategy
 
@@ -560,18 +579,24 @@ Backfill-mode migration (historical comments replayed into Slack threads) explic
 
 ### Phase 1 — MVP (this spec)
 
-- `MessagingAdapter` interface, router, events, registry, search-index.
-- Slack adapter: bot install, user-token provisioning, text posting, event ingest, wake dispatch, issue-card updates, approval buttons, soft thread lock.
+- `MessagingAdapter` interface, router, events, registry.
+- Slack adapter: bot install, user-token provisioning, text posting, event ingest (new/edit/delete/reaction), wake dispatch, issue-card updates, soft thread lock.
+- First-class orchestration columns on `messaging_message_refs`: `createdByRunId`, `editedAt`, `deletedAt`, `suppressedForWake`.
+- `feedback_votes` target repointed to `messaging_message_refs.id`.
+- Channel-membership rule enforced via Paperclip-only management + bot-as-sole-channel-manager.
+- File attachments round-trip (Slack + Paperclip blob store dual-owned).
 - FakeAdapter for tests + local dev.
-- Fresh-start migration: drop `issue_comments`, rename attachments FK.
+- Fresh-start migration: drop `issue_comments`, rename attachments FK, repoint feedback target.
 - UI: Settings → Messaging; agent link status; inbox subscription prefs.
 - `#paperclip-inbox` per-user bot DM (default on, six default event types, dedup, auto-discovery identity binding).
 - Slack app manifest in repo.
+- Approvals: bot posts notification to thread with Paperclip link (no buttons yet).
 
 ### Phase 1.5
 
-- File attachments round-trip.
-- Admin diagnose/reindex endpoints beyond the stubs.
+- Approval buttons in Slack threads (Block Kit interactivity).
+- Slack reactions → `feedback_votes` bridging (👍/👎 on agent-authored messages).
+- Derived search index as adapter capability (opt-in; rebuildable from Slack).
 - Auto-archive project channels when project reaches `done`.
 - Per-user inbox private-channel mode.
 
@@ -592,16 +617,17 @@ Backfill-mode migration (historical comments replayed into Slack threads) explic
 - **Token rotation:** start with long-lived non-refreshing tokens. Revisit when Slack deprecates or when agent token count warrants.
 - **Approval permissions mapping:** which Paperclip roles can click Approve/Deny from Slack? Default: same permissions the approval API enforces. Specifics deferred to implementation plan.
 - **Historical comment archive format:** if an operator wants the dropped `issue_comments` as a one-shot JSON export before the destructive migration, the CLI will offer `paperclipai migrate --archive-comments <path>`. Non-binding; implementation-plan detail.
-- **Search ranking:** Postgres `ts_rank` on `bodyTsv`. Tunable later.
+- **Search** on comment bodies is not available in MVP. `GET /api/companies/:id/issues?q=…` continues to search issue titles/descriptions via SQL; comment-body search returns "not supported" until the Phase 1.5 derived-index capability lands.
 
 ## Risks & honest tradeoffs
 
-- **Vendor dependence on Slack** for comm availability. Intentional; matches the "Slack is the record" semantic. Mitigation: adapter abstraction means a future migration to another backend is a provisioning/reindex exercise, not a code rewrite.
-- **Slack rate limits** on high-activity companies. Mitigation: adapter read-through served from the derived index (not live); inbound events drive freshness. Post path hits `chat.postMessage` once per comment; Tier 1 quota is adequate for realistic agent counts.
+- **Vendor dependence on Slack** for comm availability. Intentional; matches the "Slack is the record" semantic. Mitigation: adapter abstraction means a future migration to another backend is a provisioning exercise, not a code rewrite.
+- **Slack rate limits** on read path. Every `GET /comments` call hits `conversations.replies` live. Tier 3 (~50 req/min per method per workspace) is plenty for MVP-scale instances; a derived-index capability in Phase 1.5 flips the read path to index-first if/when pain shows up.
 - **Paid Slack seat per agent** is a real monetary cost. Acceptable at the scale of a personal/small-company instance. For scale-out, Phase 2 SCIM automation keeps linear cost but eliminates manual provisioning friction.
+- **Message edits/deletes in Slack are consequences, not audit gaps.** If a human edits or deletes a message in Slack, Paperclip records the timestamp but not the prior content. This matches the "Slack is the tool; if you edit the tool, you deal with the consequence" posture. Acceptable; users who need full audit history should disable edits at the workspace level or use Slack's own retention tools.
 - **`approval_comments` stays separate** in Phase 1 — minor UX inconsistency (approvals have their own chatter outside the issue's Slack thread). Acceptable for MVP; addressable in Phase 2 by routing approval comments into the issue's thread.
 - **Thread-lock is soft** (not native Slack). A determined user can still type in a locked thread; events.ts will reject with a polite bot reply. Good enough for MVP.
 
 ## Summary
 
-This design moves Paperclip's communication surface out of the database and into Slack, mediated by a pluggable `MessagingAdapter` interface. It preserves Paperclip's wake/heartbeat semantics, its approval/execution flows, and its UI, while making Slack the canonical record. The architecture is honest about the tradeoffs — Slack outage means Paperclip comments pause, and portability across messaging backends is a provisioning/reindex exercise — but it keeps the door open for future backends without forcing a rewrite.
+This design moves Paperclip's conversational surface into Slack while keeping Paperclip canonical for everything else — issues, approvals, run linkage, wake routing, channel membership. The split is explicit (see **Field ownership** above): Slack owns message bodies, edits, deletes, reactions; Paperclip owns orchestration and issue state. `messaging_message_refs` is the bridge — pointer rows plus first-class orchestration metadata, no body text. MVP reads live from Slack; a derived search index is a later adapter capability if rate-limit pain shows up. The architecture is honest about the tradeoffs — Slack outage means Paperclip comments pause; edits in Slack are consequences, not audit gaps — but it keeps the door open for future backends without forcing a rewrite.
