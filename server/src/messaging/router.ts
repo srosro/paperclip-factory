@@ -175,6 +175,14 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
       eq(messagingIdentities.backend, deps.backend),
       eq(messagingIdentities.companyId, args.companyId),
     ];
+    // Defense-in-depth: for Slack, also require the identity to belong to
+    // this router's workspace install. Prevents a company-matching row from
+    // a prior workspace install from being picked up accidentally.
+    if (workspaceInstallId) {
+      whereClauses.push(
+        eq(messagingIdentities.workspaceInstallId, workspaceInstallId),
+      );
+    }
     if (args.agentId) {
       whereClauses.push(eq(messagingIdentities.agentId, args.agentId));
     } else if (args.userId) {
