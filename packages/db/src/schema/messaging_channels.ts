@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, index, uniqueIndex, check } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, jsonb, index, uniqueIndex, check } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 import { projects } from "./projects.js";
@@ -16,6 +16,13 @@ export const messagingChannels = pgTable(
     externalChannelRef: text("external_channel_ref").notNull(),
     externalChannelName: text("external_channel_name"),
     state: text("state").notNull().default("active"),
+    /**
+     * Backend-specific metadata. Used by the inbox service to track per-DM
+     * dedup state (last posted event, last posted Slack ts, last issue id,
+     * rolled-up summary counts) so events within a 2-minute window update the
+     * existing DM message instead of spamming new ones.
+     */
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

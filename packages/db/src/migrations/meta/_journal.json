@@ -414,6 +414,13 @@
       "when": 1776476732466,
       "tag": "0058_slack_first_comms",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1776481460960,
+      "tag": "0059_inbox_metadata",
+      "breakpoints": true
     }
   ]
 }
