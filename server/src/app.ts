@@ -56,7 +56,7 @@ import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
 import { defaultSlackResolvers, initMessaging } from "./messaging/index.js";
-import { dispatchInboxForMention } from "./messaging/inbox.js";
+import { handleMessageCreatedSideEffects } from "./messaging/side-effects.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -146,18 +146,11 @@ export async function createApp(
     slack: slackEnvConfigured
       ? defaultSlackResolvers(db, opts.storageService)
       : undefined,
-    onMessageCreated: async ({ companyId, issueId, refId, authorExternalRef, mentionedUserIds }) => {
-      if (mentionedUserIds.length === 0) return;
-      for (const userId of mentionedUserIds) {
-        void dispatchInboxForMention(db, {
-          companyId,
-          mentionedUserId: userId,
-          issueId,
-          fromDisplayName: authorExternalRef,
-          commentRefId: refId,
-        });
-      }
-    },
+    // onMessageCreated is the single hook that inbound events fire after a
+    // ref row is persisted. It feeds the unified side-effect pipeline so
+    // inbound Slack comments wake assignees + mentioned agents and DM
+    // mentioned users — same behavior outbound posts get.
+    onMessageCreated: (args) => handleMessageCreatedSideEffects({ db }, args),
   });
 
   const app = express();
