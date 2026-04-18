@@ -12,6 +12,19 @@ Make Slack the single, authoritative surface for all Paperclip communication. Ev
 - Replacing Paperclip's issue, workflow, approval, or execution state — only the comment/message surface moves.
 - Auto-provisioning Slack user accounts via SCIM or similar (deferred; manual invite + OAuth dance for MVP).
 - Cross-company merged inbox, digest summaries, slash commands (deferred to later phases).
+- **Local message-body backup.** No mirror store, no durable outbox, no replay queue. Slack owns every body byte. If Slack is down, Paperclip comments pause — intentional.
+- **Production routing to the fake adapter.** The fake adapter is a test/dev fixture only. No production code path selects `fake` because Slack env vars happen to be absent or the workspace happens to be uninstalled.
+
+## Phase 1 scope freeze
+
+Phase 1 production behavior is **Slack-or-disabled, per company**, resolved on every request from per-company state — not from process-global environment variables:
+
+- The only production backend is Slack. Future backends (Discord, Matrix, etc.) arrive in Phase 3; they do not bleed into Phase 1 routing.
+- Whether a company has messaging enabled is determined by `messaging_company_config.activeBackend` + `messaging_workspace_install`. Presence of Slack env vars in the server process is a prerequisite for Slack working at all, but does not implicitly enable Slack for any company.
+- Multi-company deployments are first-class. Each company has its own workspace install, its own identities, its own channels. There is no global "currently-selected backend".
+- The fake adapter remains registered, but only for tests and local dev loops that explicitly opt in via `messaging_company_config.activeBackend = 'fake'` (or an equivalent test-time harness). Production deployments never route through it.
+
+Merge gate for any follow-on architecture pass: routing, identity resolution, and side effects must all be company-scoped. A request for company A must be structurally incapable of touching company B's messaging state.
 
 ## High-level shape
 
@@ -551,7 +564,7 @@ Lives in `server/src/messaging/adapters/fake/adapter.ts`. Full `MessagingAdapter
 - `getThreadMessages` reads from same in-memory state.
 - Failure injection: `fakeAdapter.failNextPost('rate_limited')` for retry-path tests.
 
-Local dev default: `activeBackend = 'fake'` with the embedded-postgres dev loop. Slack credentials not required for any development except the Slack adapter itself.
+Local dev default: `activeBackend = 'fake'` with the embedded-postgres dev loop. Slack credentials not required for any development except the Slack adapter itself. Production deployments never route through the fake adapter — it stays scoped to tests/dev by contract, regardless of whether Slack env vars are present.
 
 ### Test layers
 
