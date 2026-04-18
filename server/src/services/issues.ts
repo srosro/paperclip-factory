@@ -1,4 +1,3 @@
-// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -19,11 +18,12 @@ import {
   issueReadStates,
   issues,
   labels,
+  messagingMessageRefs,
+  messagingThreads,
   projectWorkspaces,
   projects,
 } from "@paperclipai/db";
-// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
-const issueComments = undefined as never;
+import { getMessagingRouter, isMessagingInitialized } from "../messaging/index.js";
 import type { IssueRelationIssueSummary } from "@paperclipai/shared";
 import { extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -190,10 +190,12 @@ function touchedByUserCondition(companyId: string, userId: string) {
       )
       OR EXISTS (
         SELECT 1
-        FROM ${issueComments}
-        WHERE ${issueComments.issueId} = ${issues.id}
-          AND ${issueComments.companyId} = ${companyId}
-          AND ${issueComments.authorUserId} = ${userId}
+        FROM ${messagingMessageRefs}
+        JOIN ${messagingThreads}
+          ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
+        WHERE ${messagingThreads.issueId} = ${issues.id}
+          AND ${messagingMessageRefs.authorUserId} = ${userId}
+          AND ${messagingMessageRefs.deletedAt} IS NULL
       )
     )
   `;
@@ -206,10 +208,12 @@ function participatedByAgentCondition(companyId: string, agentId: string) {
       OR ${issues.assigneeAgentId} = ${agentId}
       OR EXISTS (
         SELECT 1
-        FROM ${issueComments}
-        WHERE ${issueComments.issueId} = ${issues.id}
-          AND ${issueComments.companyId} = ${companyId}
-          AND ${issueComments.authorAgentId} = ${agentId}
+        FROM ${messagingMessageRefs}
+        JOIN ${messagingThreads}
+          ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
+        WHERE ${messagingThreads.issueId} = ${issues.id}
+          AND ${messagingMessageRefs.authorAgentId} = ${agentId}
+          AND ${messagingMessageRefs.deletedAt} IS NULL
       )
       OR EXISTS (
         SELECT 1
@@ -224,13 +228,17 @@ function participatedByAgentCondition(companyId: string, agentId: string) {
 }
 
 function myLastCommentAtExpr(companyId: string, userId: string) {
+  // companyId filter is implicit via thread -> issue -> companyId path.
+  void companyId;
   return sql<Date | null>`
     (
-      SELECT MAX(${issueComments.createdAt})
-      FROM ${issueComments}
-      WHERE ${issueComments.issueId} = ${issues.id}
-        AND ${issueComments.companyId} = ${companyId}
-        AND ${issueComments.authorUserId} = ${userId}
+      SELECT MAX(${messagingMessageRefs.firstSeenAt})
+      FROM ${messagingMessageRefs}
+      JOIN ${messagingThreads}
+        ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
+      WHERE ${messagingThreads.issueId} = ${issues.id}
+        AND ${messagingMessageRefs.authorUserId} = ${userId}
+        AND ${messagingMessageRefs.deletedAt} IS NULL
     )
   `;
 }
@@ -261,15 +269,18 @@ function myLastTouchAtExpr(companyId: string, userId: string) {
 }
 
 function lastExternalCommentAtExpr(companyId: string, userId: string) {
+  void companyId;
   return sql<Date | null>`
     (
-      SELECT MAX(${issueComments.createdAt})
-      FROM ${issueComments}
-      WHERE ${issueComments.issueId} = ${issues.id}
-        AND ${issueComments.companyId} = ${companyId}
+      SELECT MAX(${messagingMessageRefs.firstSeenAt})
+      FROM ${messagingMessageRefs}
+      JOIN ${messagingThreads}
+        ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
+      WHERE ${messagingThreads.issueId} = ${issues.id}
+        AND ${messagingMessageRefs.deletedAt} IS NULL
         AND (
-          ${issueComments.authorUserId} IS NULL
-          OR ${issueComments.authorUserId} <> ${userId}
+          ${messagingMessageRefs.authorUserId} IS NULL
+          OR ${messagingMessageRefs.authorUserId} <> ${userId}
         )
     )
   `;
@@ -298,12 +309,15 @@ const ISSUE_LOCAL_INBOX_ACTIVITY_ACTIONS = [
 ] as const;
 
 function issueLatestCommentAtExpr(companyId: string) {
+  void companyId;
   return sql<Date | null>`
     (
-      SELECT MAX(${issueComments.createdAt})
-      FROM ${issueComments}
-      WHERE ${issueComments.issueId} = ${issues.id}
-        AND ${issueComments.companyId} = ${companyId}
+      SELECT MAX(${messagingMessageRefs.firstSeenAt})
+      FROM ${messagingMessageRefs}
+      JOIN ${messagingThreads}
+        ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
+      WHERE ${messagingThreads.issueId} = ${issues.id}
+        AND ${messagingMessageRefs.deletedAt} IS NULL
     )
   `;
 }
@@ -344,14 +358,16 @@ function unreadForUserCondition(companyId: string, userId: string) {
       ${touchedCondition}
       AND EXISTS (
         SELECT 1
-        FROM ${issueComments}
-        WHERE ${issueComments.issueId} = ${issues.id}
-          AND ${issueComments.companyId} = ${companyId}
+        FROM ${messagingMessageRefs}
+        JOIN ${messagingThreads}
+          ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
+        WHERE ${messagingThreads.issueId} = ${issues.id}
+          AND ${messagingMessageRefs.deletedAt} IS NULL
           AND (
-            ${issueComments.authorUserId} IS NULL
-            OR ${issueComments.authorUserId} <> ${userId}
+            ${messagingMessageRefs.authorUserId} IS NULL
+            OR ${messagingMessageRefs.authorUserId} <> ${userId}
           )
-          AND ${issueComments.createdAt} > ${myLastTouchAt}
+          AND ${messagingMessageRefs.firstSeenAt} > ${myLastTouchAt}
       )
     )
   `;
@@ -978,15 +994,13 @@ export function issueService(db: Db) {
       const identifierStartsWithMatch = sql<boolean>`${issues.identifier} ILIKE ${startsWithPattern} ESCAPE '\\'`;
       const identifierContainsMatch = sql<boolean>`${issues.identifier} ILIKE ${containsPattern} ESCAPE '\\'`;
       const descriptionContainsMatch = sql<boolean>`${issues.description} ILIKE ${containsPattern} ESCAPE '\\'`;
-      const commentContainsMatch = sql<boolean>`
-        EXISTS (
-          SELECT 1
-          FROM ${issueComments}
-          WHERE ${issueComments.issueId} = ${issues.id}
-            AND ${issueComments.companyId} = ${companyId}
-            AND ${issueComments.body} ILIKE ${containsPattern} ESCAPE '\\'
-        )
-      `;
+      // TODO(messaging-phase2): search comment bodies. Bodies now live in the
+      // messaging backend (FakeAdapter / Slack), not in the DB, so the
+      // EXISTS-against-body-ILIKE query no longer applies. Until we either
+      // persist a searchable body copy or plumb a router-side text index,
+      // comment content is not considered in issue text search.
+      void containsPattern;
+      const commentContainsMatch = sql<boolean>`false`;
       if (filters?.status) {
         const statuses = filters.status.split(",").map((s) => s.trim());
         conditions.push(statuses.length === 1 ? eq(issues.status, statuses[0]) : inArray(issues.status, statuses));
@@ -1075,27 +1089,28 @@ export function issueService(db: Db) {
         contextUserId
           ? db
             .select({
-              issueId: issueComments.issueId,
+              issueId: messagingThreads.issueId,
               myLastCommentAt: sql<Date | null>`
-                MAX(CASE WHEN ${issueComments.authorUserId} = ${contextUserId} THEN ${issueComments.createdAt} END)
+                MAX(CASE WHEN ${messagingMessageRefs.authorUserId} = ${contextUserId} THEN ${messagingMessageRefs.firstSeenAt} END)
               `,
               lastExternalCommentAt: sql<Date | null>`
                 MAX(
                   CASE
-                    WHEN ${issueComments.authorUserId} IS NULL OR ${issueComments.authorUserId} <> ${contextUserId}
-                    THEN ${issueComments.createdAt}
+                    WHEN ${messagingMessageRefs.authorUserId} IS NULL OR ${messagingMessageRefs.authorUserId} <> ${contextUserId}
+                    THEN ${messagingMessageRefs.firstSeenAt}
                   END
                 )
               `,
             })
-            .from(issueComments)
+            .from(messagingMessageRefs)
+            .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
             .where(
               and(
-                eq(issueComments.companyId, companyId),
-                inArray(issueComments.issueId, issueIds),
+                isNull(messagingMessageRefs.deletedAt),
+                inArray(messagingThreads.issueId, issueIds),
               ),
             )
-            .groupBy(issueComments.issueId)
+            .groupBy(messagingThreads.issueId)
           : Promise.resolve([]),
         contextUserId
           ? db
@@ -1115,17 +1130,18 @@ export function issueService(db: Db) {
         Promise.all([
           db
             .select({
-              issueId: issueComments.issueId,
-              latestCommentAt: sql<Date | null>`MAX(${issueComments.createdAt})`,
+              issueId: messagingThreads.issueId,
+              latestCommentAt: sql<Date | null>`MAX(${messagingMessageRefs.firstSeenAt})`,
             })
-            .from(issueComments)
+            .from(messagingMessageRefs)
+            .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
             .where(
               and(
-                eq(issueComments.companyId, companyId),
-                inArray(issueComments.issueId, issueIds),
+                isNull(messagingMessageRefs.deletedAt),
+                inArray(messagingThreads.issueId, issueIds),
               ),
             )
-            .groupBy(issueComments.issueId),
+            .groupBy(messagingThreads.issueId),
           db
             .select({
               issueId: activityLog.entityId,
@@ -1741,7 +1757,24 @@ export function issueService(db: Db) {
         return enriched;
       };
 
-      return dbOrTx === db ? db.transaction(runUpdate) : runUpdate(dbOrTx);
+      const result = dbOrTx === db ? await db.transaction(runUpdate) : await runUpdate(dbOrTx);
+
+      // Push the updated issue card (title/status/assignee/etc.) to the
+      // messaging backend so the thread header stays in sync. Best-effort;
+      // failures are logged inside the router.
+      if (result && isMessagingInitialized()) {
+        const touched =
+          issueData.status !== undefined ||
+          issueData.title !== undefined ||
+          issueData.assigneeAgentId !== undefined ||
+          issueData.assigneeUserId !== undefined ||
+          issueData.priority !== undefined;
+        if (touched) {
+          void getMessagingRouter().onIssueStateChange(result.id);
+        }
+      }
+
+      return result;
     },
 
     remove: (id: string) =>
@@ -2067,6 +2100,10 @@ export function issueService(db: Db) {
         .returning()
         .then((rows) => rows[0] ?? null),
 
+    // Router-backed comment APIs. Return shape preserves the legacy
+    // { id, issueId, companyId, body, authorAgentId, authorUserId,
+    //   createdByRunId, createdAt, updatedAt } envelope so UI + callers keep
+    // working. id === messaging_message_refs.id (aka refId).
     listComments: async (
       issueId: string,
       opts?: {
@@ -2082,104 +2119,150 @@ export function issueService(db: Db) {
           ? Math.min(Math.floor(opts.limit), MAX_ISSUE_COMMENT_PAGE_LIMIT)
           : null;
 
-      const conditions = [eq(issueComments.issueId, issueId)];
+      const issue = await db
+        .select({ id: issues.id, companyId: issues.companyId })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      if (!issue) return [];
+
+      // Router returns all non-deleted messages chronologically ascending,
+      // merging ref rows with live adapter bodies.
+      if (!isMessagingInitialized()) return [];
+      const router = getMessagingRouter();
+      const messages = await router.getThreadMessages({ issueId });
+
+      let filtered = messages;
       if (afterCommentId) {
-        const anchor = await db
-          .select({
-            id: issueComments.id,
-            createdAt: issueComments.createdAt,
-          })
-          .from(issueComments)
-          .where(and(eq(issueComments.issueId, issueId), eq(issueComments.id, afterCommentId)))
-          .then((rows) => rows[0] ?? null);
-
-        if (!anchor) return [];
-        conditions.push(
-          order === "asc"
-            ? sql<boolean>`(
-                ${issueComments.createdAt} > ${anchor.createdAt}
-                OR (${issueComments.createdAt} = ${anchor.createdAt} AND ${issueComments.id} > ${anchor.id})
-              )`
-            : sql<boolean>`(
-                ${issueComments.createdAt} < ${anchor.createdAt}
-                OR (${issueComments.createdAt} = ${anchor.createdAt} AND ${issueComments.id} < ${anchor.id})
-              )`,
-        );
+        const idx = messages.findIndex((m) => m.refId === afterCommentId);
+        if (idx < 0) return [];
+        filtered = messages.slice(idx + 1);
       }
+      if (order === "desc") filtered = [...filtered].reverse();
+      if (limit) filtered = filtered.slice(0, limit);
 
-      const query = db
-        .select()
-        .from(issueComments)
-        .where(and(...conditions))
-        .orderBy(
-          order === "asc" ? asc(issueComments.createdAt) : desc(issueComments.createdAt),
-          order === "asc" ? asc(issueComments.id) : desc(issueComments.id),
-        );
-
-      const comments = limit ? await query.limit(limit) : await query;
       const { censorUsernameInLogs } = await instanceSettings.getGeneral();
-      return comments.map((comment) => redactIssueComment(comment, censorUsernameInLogs));
+      return filtered.map((m) => redactIssueComment({
+        id: m.refId,
+        companyId: issue.companyId,
+        issueId,
+        authorAgentId: m.authorAgentId,
+        authorUserId: m.authorUserId,
+        createdByRunId: m.createdByRunId,
+        body: m.body,
+        createdAt: m.firstSeenAt,
+        updatedAt: m.editedAt ?? m.firstSeenAt,
+      }, censorUsernameInLogs));
     },
 
     getCommentCursor: async (issueId: string) => {
-      const [latest, countRow] = await Promise.all([
-        db
-          .select({
-            latestCommentId: issueComments.id,
-            latestCommentAt: issueComments.createdAt,
-          })
-          .from(issueComments)
-          .where(eq(issueComments.issueId, issueId))
-          .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
-          .limit(1)
-          .then((rows) => rows[0] ?? null),
-        db
-          .select({
-            totalComments: sql<number>`count(*)::int`,
-          })
-          .from(issueComments)
-          .where(eq(issueComments.issueId, issueId))
-          .then((rows) => rows[0] ?? null),
-      ]);
-
+      if (!isMessagingInitialized()) {
+        return { totalComments: 0, latestCommentId: null, latestCommentAt: null };
+      }
+      const messages = await getMessagingRouter().getThreadMessages({ issueId });
+      if (messages.length === 0) {
+        return { totalComments: 0, latestCommentId: null, latestCommentAt: null };
+      }
+      const latest = messages[messages.length - 1]!;
       return {
-        totalComments: Number(countRow?.totalComments ?? 0),
-        latestCommentId: latest?.latestCommentId ?? null,
-        latestCommentAt: latest?.latestCommentAt ?? null,
+        totalComments: messages.length,
+        latestCommentId: latest.refId,
+        latestCommentAt: latest.firstSeenAt,
       };
     },
 
-    getComment: (commentId: string) =>
-      instanceSettings.getGeneral().then(({ censorUsernameInLogs }) =>
-        db
-        .select()
-        .from(issueComments)
-        .where(eq(issueComments.id, commentId))
-        .then((rows) => {
-          const comment = rows[0] ?? null;
-          return comment ? redactIssueComment(comment, censorUsernameInLogs) : null;
-        })),
+    getComment: async (commentId: string) => {
+      const [refRow] = await db
+        .select({
+          id: messagingMessageRefs.id,
+          issueId: messagingThreads.issueId,
+          companyId: issues.companyId,
+          authorAgentId: messagingMessageRefs.authorAgentId,
+          authorUserId: messagingMessageRefs.authorUserId,
+          createdByRunId: messagingMessageRefs.createdByRunId,
+          createdAt: messagingMessageRefs.firstSeenAt,
+          editedAt: messagingMessageRefs.editedAt,
+        })
+        .from(messagingMessageRefs)
+        .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+        .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
+        .where(eq(messagingMessageRefs.id, commentId))
+        .limit(1);
+      if (!refRow) return null;
+
+      let body = "";
+      if (isMessagingInitialized()) {
+        const msgs = await getMessagingRouter().getThreadMessages({ issueId: refRow.issueId });
+        body = msgs.find((m) => m.refId === refRow.id)?.body ?? "";
+      }
+      const { censorUsernameInLogs } = await instanceSettings.getGeneral();
+      return redactIssueComment({
+        id: refRow.id,
+        companyId: refRow.companyId,
+        issueId: refRow.issueId,
+        authorAgentId: refRow.authorAgentId,
+        authorUserId: refRow.authorUserId,
+        createdByRunId: refRow.createdByRunId,
+        body,
+        createdAt: refRow.createdAt,
+        updatedAt: refRow.editedAt ?? refRow.createdAt,
+      }, censorUsernameInLogs);
+    },
 
     removeComment: async (commentId: string) => {
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
       };
 
-      return db.transaction(async (tx) => {
-        const [comment] = await tx
-          .delete(issueComments)
-          .where(eq(issueComments.id, commentId))
-          .returning();
+      // Look up first so we can return the same legacy shape the callers expect.
+      const [refRow] = await db
+        .select({
+          id: messagingMessageRefs.id,
+          issueId: messagingThreads.issueId,
+          companyId: issues.companyId,
+          authorAgentId: messagingMessageRefs.authorAgentId,
+          authorUserId: messagingMessageRefs.authorUserId,
+          createdByRunId: messagingMessageRefs.createdByRunId,
+          createdAt: messagingMessageRefs.firstSeenAt,
+          editedAt: messagingMessageRefs.editedAt,
+        })
+        .from(messagingMessageRefs)
+        .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+        .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
+        .where(eq(messagingMessageRefs.id, commentId))
+        .limit(1);
+      if (!refRow) return null;
 
-        if (!comment) return null;
+      let body = "";
+      if (isMessagingInitialized()) {
+        const msgs = await getMessagingRouter().getThreadMessages({ issueId: refRow.issueId });
+        body = msgs.find((m) => m.refId === refRow.id)?.body ?? "";
+      }
 
+      // Soft-delete by marking deletedAt on the ref. UI/queue treats this as
+      // "removed" identically to the legacy hard delete.
+      await db.transaction(async (tx) => {
+        await tx
+          .update(messagingMessageRefs)
+          .set({ deletedAt: new Date() })
+          .where(eq(messagingMessageRefs.id, commentId));
         await tx
           .update(issues)
           .set({ updatedAt: new Date() })
-          .where(eq(issues.id, comment.issueId));
-
-        return redactIssueComment(comment, currentUserRedactionOptions.enabled);
+          .where(eq(issues.id, refRow.issueId));
       });
+
+      return redactIssueComment({
+        id: refRow.id,
+        companyId: refRow.companyId,
+        issueId: refRow.issueId,
+        authorAgentId: refRow.authorAgentId,
+        authorUserId: refRow.authorUserId,
+        createdByRunId: refRow.createdByRunId,
+        body,
+        createdAt: refRow.createdAt,
+        updatedAt: refRow.editedAt ?? refRow.createdAt,
+      }, currentUserRedactionOptions.enabled);
     },
 
     addComment: async (
@@ -2188,34 +2271,49 @@ export function issueService(db: Db) {
       actor: { agentId?: string; userId?: string; runId?: string | null },
     ) => {
       const issue = await db
-        .select({ companyId: issues.companyId })
+        .select({ companyId: issues.companyId, projectId: issues.projectId })
         .from(issues)
         .where(eq(issues.id, issueId))
         .then((rows) => rows[0] ?? null);
 
       if (!issue) throw notFound("Issue not found");
+      if (!issue.projectId) {
+        throw unprocessable("Cannot comment on an issue without a project");
+      }
 
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
       };
       const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
-      const [comment] = await db
-        .insert(issueComments)
-        .values({
-          companyId: issue.companyId,
-          issueId,
-          authorAgentId: actor.agentId ?? null,
-          authorUserId: actor.userId ?? null,
-          createdByRunId: actor.runId ?? null,
-          body: redactedBody,
-        })
-        .returning();
+
+      const router = getMessagingRouter();
+      const posted = await router.postMessage({
+        companyId: issue.companyId,
+        issueId,
+        projectId: issue.projectId,
+        authorAgentId: actor.agentId,
+        authorUserId: actor.userId,
+        body: redactedBody,
+        createdByRunId: actor.runId ?? undefined,
+      });
 
       // Update issue's updatedAt so comment activity is reflected in recency sorting
       await db
         .update(issues)
         .set({ updatedAt: new Date() })
         .where(eq(issues.id, issueId));
+
+      const comment = {
+        id: posted.id,
+        companyId: issue.companyId,
+        issueId,
+        authorAgentId: actor.agentId ?? null,
+        authorUserId: actor.userId ?? null,
+        createdByRunId: actor.runId ?? null,
+        body: redactedBody,
+        createdAt: posted.createdAt,
+        updatedAt: posted.createdAt,
+      };
 
       return redactIssueComment(comment, currentUserRedactionOptions.enabled);
     },
@@ -2239,14 +2337,22 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!issue) throw notFound("Issue not found");
 
+      // input.issueCommentId is the legacy field name the callers pass; it
+      // now refers to a messaging_message_refs.id.
       if (input.issueCommentId) {
-        const comment = await db
-          .select({ id: issueComments.id, companyId: issueComments.companyId, issueId: issueComments.issueId })
-          .from(issueComments)
-          .where(eq(issueComments.id, input.issueCommentId))
-          .then((rows) => rows[0] ?? null);
-        if (!comment) throw notFound("Issue comment not found");
-        if (comment.companyId !== issue.companyId || comment.issueId !== issue.id) {
+        const [refRow] = await db
+          .select({
+            id: messagingMessageRefs.id,
+            issueId: messagingThreads.issueId,
+            companyId: issues.companyId,
+          })
+          .from(messagingMessageRefs)
+          .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+          .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
+          .where(eq(messagingMessageRefs.id, input.issueCommentId))
+          .limit(1);
+        if (!refRow) throw notFound("Issue comment not found");
+        if (refRow.companyId !== issue.companyId || refRow.issueId !== issue.id) {
           throw unprocessable("Attachment comment must belong to same issue and company");
         }
       }
@@ -2273,7 +2379,7 @@ export function issueService(db: Db) {
             companyId: issue.companyId,
             issueId: issue.id,
             assetId: asset.id,
-            issueCommentId: input.issueCommentId ?? null,
+            messagingMessageRefId: input.issueCommentId ?? null,
           })
           .returning();
 
@@ -2281,7 +2387,7 @@ export function issueService(db: Db) {
           id: attachment.id,
           companyId: attachment.companyId,
           issueId: attachment.issueId,
-          issueCommentId: attachment.issueCommentId,
+          issueCommentId: attachment.messagingMessageRefId,
           assetId: attachment.assetId,
           provider: asset.provider,
           objectKey: asset.objectKey,
@@ -2303,7 +2409,7 @@ export function issueService(db: Db) {
           id: issueAttachments.id,
           companyId: issueAttachments.companyId,
           issueId: issueAttachments.issueId,
-          issueCommentId: issueAttachments.issueCommentId,
+          issueCommentId: issueAttachments.messagingMessageRefId,
           assetId: issueAttachments.assetId,
           provider: assets.provider,
           objectKey: assets.objectKey,
@@ -2327,7 +2433,7 @@ export function issueService(db: Db) {
           id: issueAttachments.id,
           companyId: issueAttachments.companyId,
           issueId: issueAttachments.issueId,
-          issueCommentId: issueAttachments.issueCommentId,
+          issueCommentId: issueAttachments.messagingMessageRefId,
           assetId: issueAttachments.assetId,
           provider: assets.provider,
           objectKey: assets.objectKey,
@@ -2352,7 +2458,7 @@ export function issueService(db: Db) {
             id: issueAttachments.id,
             companyId: issueAttachments.companyId,
             issueId: issueAttachments.issueId,
-            issueCommentId: issueAttachments.issueCommentId,
+            issueCommentId: issueAttachments.messagingMessageRefId,
             assetId: issueAttachments.assetId,
             provider: assets.provider,
             objectKey: assets.objectKey,
@@ -2420,14 +2526,10 @@ export function issueService(db: Db) {
         }
       }
 
-      if (opts?.includeCommentBodies !== false) {
-        const comments = await db
-          .select({ body: issueComments.body })
-          .from(issueComments)
-          .where(eq(issueComments.issueId, issueId));
-
-        for (const comment of comments) {
-          for (const projectId of extractProjectMentionIds(comment.body)) {
+      if (opts?.includeCommentBodies !== false && isMessagingInitialized()) {
+        const messages = await getMessagingRouter().getThreadMessages({ issueId });
+        for (const message of messages) {
+          for (const projectId of extractProjectMentionIds(message.body)) {
             mentionedIds.add(projectId);
           }
         }

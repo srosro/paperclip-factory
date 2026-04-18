@@ -1,4 +1,3 @@
-// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
@@ -15,11 +14,12 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issues,
+  messagingMessageRefs,
+  messagingThreads,
   projects,
   projectWorkspaces,
 } from "@paperclipai/db";
-// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
-const issueComments = undefined as never;
+import { getMessagingRouter, isMessagingInitialized } from "../messaging/index.js";
 import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
@@ -187,19 +187,16 @@ async function resolveRunScopedMentionedSkillKeys(input: {
     .then((rows) => rows[0] ?? null);
   if (!issue) return [];
 
-  const comments = await input.db
-    .select({ body: issueComments.body })
-    .from(issueComments)
-    .where(
-      and(
-        eq(issueComments.issueId, input.issueId),
-        eq(issueComments.companyId, input.companyId),
-      ),
-    );
+  // Bodies live in the messaging backend (FakeAdapter / Slack), not in the
+  // db. Fetch them via the router when available.
+  const issueId = input.issueId;
+  const commentBodies = isMessagingInitialized()
+    ? (await getMessagingRouter().getThreadMessages({ issueId })).map((m) => m.body)
+    : [];
   const mentionedSkillIds = extractMentionedSkillIdsFromSources([
     issue.title,
     issue.description ?? "",
-    ...comments.map((comment) => comment.body),
+    ...commentBodies,
   ]);
   if (mentionedSkillIds.length === 0) return [];
 
@@ -1236,26 +1233,56 @@ async function buildPaperclipWakePayload(input: {
       : null);
   if (commentIds.length === 0 && Object.keys(executionStage).length === 0 && !issueSummary) return null;
 
-  const commentRows =
+  // commentIds are now messaging_message_refs.id values. Join via threads ->
+  // issues to filter by companyId. Bodies live in the backend, not in the db.
+  type CommentRow = {
+    id: string;
+    issueId: string;
+    body: string;
+    authorAgentId: string | null;
+    authorUserId: string | null;
+    createdAt: Date;
+  };
+  const commentRefs =
     commentIds.length === 0
       ? []
       : await input.db
           .select({
-            id: issueComments.id,
-            issueId: issueComments.issueId,
-            body: issueComments.body,
-            authorAgentId: issueComments.authorAgentId,
-            authorUserId: issueComments.authorUserId,
-            createdAt: issueComments.createdAt,
+            id: messagingMessageRefs.id,
+            issueId: messagingThreads.issueId,
+            authorAgentId: messagingMessageRefs.authorAgentId,
+            authorUserId: messagingMessageRefs.authorUserId,
+            createdAt: messagingMessageRefs.firstSeenAt,
           })
-          .from(issueComments)
+          .from(messagingMessageRefs)
+          .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+          .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
           .where(
             and(
-              eq(issueComments.companyId, input.companyId),
-              inArray(issueComments.id, commentIds),
+              eq(issues.companyId, input.companyId),
+              inArray(messagingMessageRefs.id, commentIds),
             ),
           );
 
+  const bodyByIssue = new Map<string, Map<string, string>>();
+  if (commentRefs.length > 0 && isMessagingInitialized()) {
+    const uniqueIssueIds = [...new Set(commentRefs.map((r) => r.issueId))];
+    const router = getMessagingRouter();
+    for (const issueIdForBody of uniqueIssueIds) {
+      const msgs = await router.getThreadMessages({ issueId: issueIdForBody });
+      const byRef = new Map(msgs.map((m) => [m.refId, m.body]));
+      bodyByIssue.set(issueIdForBody, byRef);
+    }
+  }
+
+  const commentRows: CommentRow[] = commentRefs.map((r) => ({
+    id: r.id,
+    issueId: r.issueId,
+    body: bodyByIssue.get(r.issueId)?.get(r.id) ?? "",
+    authorAgentId: r.authorAgentId,
+    authorUserId: r.authorUserId,
+    createdAt: r.createdAt,
+  }));
   const commentsById = new Map(commentRows.map((comment) => [comment.id, comment]));
   const comments: Array<Record<string, unknown>> = [];
   let remainingBodyChars = MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS;
@@ -2283,19 +2310,22 @@ export function heartbeatService(db: Db) {
   }
 
   async function findRunIssueComment(runId: string, companyId: string, issueId: string) {
+    // companyId is implicit via thread -> issue; we still filter issueId + runId.
     return db
       .select({
-        id: issueComments.id,
+        id: messagingMessageRefs.id,
       })
-      .from(issueComments)
+      .from(messagingMessageRefs)
+      .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+      .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
       .where(
         and(
-          eq(issueComments.companyId, companyId),
-          eq(issueComments.issueId, issueId),
-          eq(issueComments.createdByRunId, runId),
+          eq(issues.companyId, companyId),
+          eq(messagingThreads.issueId, issueId),
+          eq(messagingMessageRefs.createdByRunId, runId),
         ),
       )
-      .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
+      .orderBy(desc(messagingMessageRefs.firstSeenAt), desc(messagingMessageRefs.id))
       .limit(1)
       .then((rows) => rows[0] ?? null);
   }

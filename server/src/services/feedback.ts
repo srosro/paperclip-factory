@@ -1,4 +1,3 @@
-// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { and, asc, desc, eq, getTableColumns, gte, lte, ne, or } from "drizzle-orm";
@@ -17,9 +16,10 @@ import {
   instanceSettings,
   issueDocuments,
   issues,
+  messagingMessageRefs,
+  messagingThreads,
 } from "@paperclipai/db";
-// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
-const issueComments = undefined as never;
+import { getMessagingRouter, isMessagingInitialized } from "../messaging/index.js";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { claudeConfigDir, parseClaudeStreamJson } from "@paperclipai/adapter-claude-local/server";
 import { codexHomeDir, parseCodexJsonl } from "@paperclipai/adapter-codex-local/server";
@@ -792,52 +792,63 @@ async function resolveFeedbackTarget(
   const issuePath = buildIssuePath(issue.identifier);
 
   if (targetType === "issue_comment") {
-    const targetComment = await db
+    // Note: targetType remains "issue_comment" for backwards compat. The
+    // targetId now refers to messaging_message_refs.id. The URL shape
+    // (#comment-<id>) is preserved so the UI keeps working unchanged.
+    const targetRef = await db
       .select({
-        id: issueComments.id,
-        issueId: issueComments.issueId,
-        companyId: issueComments.companyId,
-        authorAgentId: issueComments.authorAgentId,
-        authorUserId: issueComments.authorUserId,
-        createdByRunId: issueComments.createdByRunId,
-        body: issueComments.body,
-        createdAt: issueComments.createdAt,
+        id: messagingMessageRefs.id,
+        issueId: messagingThreads.issueId,
+        companyId: issues.companyId,
+        authorAgentId: messagingMessageRefs.authorAgentId,
+        authorUserId: messagingMessageRefs.authorUserId,
+        createdByRunId: messagingMessageRefs.createdByRunId,
+        createdAt: messagingMessageRefs.firstSeenAt,
       })
-      .from(issueComments)
-      .where(eq(issueComments.id, targetId))
+      .from(messagingMessageRefs)
+      .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+      .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
+      .where(eq(messagingMessageRefs.id, targetId))
       .then((rows) => rows[0] ?? null);
 
-    if (!targetComment || targetComment.issueId !== issue.id || targetComment.companyId !== issue.companyId) {
+    if (!targetRef || targetRef.issueId !== issue.id || targetRef.companyId !== issue.companyId) {
       throw notFound("Feedback target not found");
     }
-    if (!targetComment.authorAgentId) {
+    if (!targetRef.authorAgentId) {
       throw unprocessable("Feedback voting is only available on agent-authored issue comments");
+    }
+
+    // Bodies live in the messaging backend, not in the db.
+    let body = "";
+    if (isMessagingInitialized()) {
+      const messages = await getMessagingRouter().getThreadMessages({ issueId: issue.id });
+      body = messages.find((m) => m.refId === targetRef.id)?.body ?? "";
     }
 
     const record: ResolvedFeedbackTarget = {
       targetType,
       targetId,
       label: "Comment",
-      body: targetComment.body,
-      createdAt: targetComment.createdAt,
-      authorAgentId: targetComment.authorAgentId,
-      authorUserId: targetComment.authorUserId,
-      createdByRunId: targetComment.createdByRunId ?? null,
+      body,
+      createdAt: targetRef.createdAt,
+      authorAgentId: targetRef.authorAgentId,
+      authorUserId: targetRef.authorUserId,
+      createdByRunId: targetRef.createdByRunId ?? null,
       documentId: null,
       documentKey: null,
       documentTitle: null,
       revisionNumber: null,
       issuePath,
-      targetPath: issuePath ? `${issuePath}#comment-${targetComment.id}` : null,
+      targetPath: issuePath ? `${issuePath}#comment-${targetRef.id}` : null,
       payloadTarget: {
         type: targetType,
-        id: targetComment.id,
-        createdAt: targetComment.createdAt.toISOString(),
-        authorAgentId: targetComment.authorAgentId,
-        authorUserId: targetComment.authorUserId,
-        createdByRunId: targetComment.createdByRunId ?? null,
+        id: targetRef.id,
+        createdAt: targetRef.createdAt.toISOString(),
+        authorAgentId: targetRef.authorAgentId,
+        authorUserId: targetRef.authorUserId,
+        createdByRunId: targetRef.createdByRunId ?? null,
         issuePath,
-        targetPath: issuePath ? `${issuePath}#comment-${targetComment.id}` : null,
+        targetPath: issuePath ? `${issuePath}#comment-${targetRef.id}` : null,
       },
     };
     return record;
@@ -912,18 +923,25 @@ async function listIssueContextItems(
   db: Pick<Db, "select">,
   issue: IssueFeedbackContext,
 ) {
-  const [commentRows, revisionRows] = await Promise.all([
+  // commentRows source: messaging_message_refs joined via messaging_threads.
+  // Bodies are fetched from the router and mapped by refId.
+  const commentBodyByRef = new Map<string, string>();
+  if (isMessagingInitialized()) {
+    const msgs = await getMessagingRouter().getThreadMessages({ issueId: issue.id });
+    for (const m of msgs) commentBodyByRef.set(m.refId, m.body);
+  }
+  const [commentRefs, revisionRows] = await Promise.all([
     db
       .select({
-        targetId: issueComments.id,
-        body: issueComments.body,
-        createdAt: issueComments.createdAt,
-        authorAgentId: issueComments.authorAgentId,
-        authorUserId: issueComments.authorUserId,
-        createdByRunId: issueComments.createdByRunId,
+        targetId: messagingMessageRefs.id,
+        createdAt: messagingMessageRefs.firstSeenAt,
+        authorAgentId: messagingMessageRefs.authorAgentId,
+        authorUserId: messagingMessageRefs.authorUserId,
+        createdByRunId: messagingMessageRefs.createdByRunId,
       })
-      .from(issueComments)
-      .where(and(eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id))),
+      .from(messagingMessageRefs)
+      .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+      .where(eq(messagingThreads.issueId, issue.id)),
     db
       .select({
         targetId: documentRevisions.id,
@@ -946,11 +964,11 @@ async function listIssueContextItems(
   const issuePath = buildIssuePath(issue.identifier);
 
   const items: FeedbackTargetRecord[] = [
-    ...commentRows.map((row) => ({
+    ...commentRefs.map((row) => ({
       targetType: "issue_comment" as const,
       targetId: row.targetId,
       label: "Comment",
-      body: row.body,
+      body: commentBodyByRef.get(row.targetId) ?? "",
       createdAt: row.createdAt,
       authorAgentId: row.authorAgentId,
       authorUserId: row.authorUserId,

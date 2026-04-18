@@ -1,4 +1,3 @@
-// TODO(messaging): rewire via messaging.router — see Part 6 of plan
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -15,9 +14,9 @@ import {
   heartbeatRuns,
   issueExecutionDecisions,
   issues,
+  messagingIdentities,
+  messagingMessageRefs,
 } from "@paperclipai/db";
-// TODO(messaging): issueComments removed in Task 1.8 — rewired in Part 6
-const issueComments = undefined as never;
 import { isUuidLike, normalizeAgentUrlKey } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
@@ -493,7 +492,13 @@ export function agentService(db: Db) {
           ),
         );
         await tx.delete(issueExecutionDecisions).where(eq(issueExecutionDecisions.actorAgentId, id));
-        await tx.delete(issueComments).where(eq(issueComments.authorAgentId, id));
+        // Null out author on any messaging refs by this agent; preserve the
+        // message history itself so threads remain intact.
+        await tx
+          .update(messagingMessageRefs)
+          .set({ authorAgentId: null })
+          .where(eq(messagingMessageRefs.authorAgentId, id));
+        await tx.delete(messagingIdentities).where(eq(messagingIdentities.agentId, id));
         await tx.delete(heartbeatRuns).where(eq(heartbeatRuns.agentId, id));
         await tx.delete(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, id));
         await tx.delete(agentApiKeys).where(eq(agentApiKeys.agentId, id));
