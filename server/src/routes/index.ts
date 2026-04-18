@@ -19,3 +19,4 @@ export { accessRoutes } from "./access.js";
 export { instanceSettingsRoutes } from "./instance-settings.js";
 export { messagingSlackRoutes } from "./messaging-slack.js";
 export { messagingInboxRoutes } from "./messaging-inbox.js";
+export { messagingAdminRoutes } from "./messaging-admin.js";

@@ -291,7 +291,7 @@ export function messagingSlackRoutes(db: Db, opts: SlackRoutesOpts = {}): Router
     }
 
     // Redirect back into the UI.
-    res.redirect("/settings/messaging?installed=1");
+    res.redirect("/company/settings/messaging?installed=1");
   });
 
   // ---------- Per-agent user OAuth ----------

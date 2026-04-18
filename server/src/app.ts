@@ -29,6 +29,7 @@ import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { messagingSlackRoutes } from "./routes/messaging-slack.js";
 import { messagingInboxRoutes } from "./routes/messaging-inbox.js";
+import { messagingAdminRoutes } from "./routes/messaging-admin.js";
 import { llmRoutes } from "./routes/llms.js";
 import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
@@ -230,6 +231,7 @@ export async function createApp(
   api.use(instanceSettingsRoutes(db));
   api.use("/messaging/slack", messagingSlackRoutes(db));
   api.use("/messaging", messagingInboxRoutes(db));
+  api.use(messagingAdminRoutes(db));
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = createPluginWorkerManager();
   const pluginRegistry = pluginRegistryService(db);
