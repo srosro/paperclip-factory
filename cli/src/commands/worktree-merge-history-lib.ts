@@ -4,7 +4,6 @@ import {
   documentRevisions,
   goals,
   issueAttachments,
-  issueComments,
   issueDocuments,
   issues,
   projects,
@@ -12,7 +11,19 @@ import {
 } from "@paperclipai/db";
 
 type IssueRow = typeof issues.$inferSelect;
-type CommentRow = typeof issueComments.$inferSelect;
+// TODO(messaging-phase2): comment export/import moves to messagingMessageRefs +
+// messagingThreads. Phase 1 disables the comment scope at the CLI boundary and
+// keeps this shape for plan-shape compatibility only.
+type CommentRow = {
+  id: string;
+  companyId: string;
+  issueId: string;
+  authorAgentId: string | null;
+  authorUserId: string | null;
+  body: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
 type AgentRow = typeof agents.$inferSelect;
 type ProjectRow = typeof projects.$inferSelect;
 type ProjectWorkspaceRow = typeof projectWorkspaces.$inferSelect;
@@ -110,7 +121,7 @@ export type IssueAttachmentRow = {
   id: IssueAttachmentTableRow["id"];
   companyId: IssueAttachmentTableRow["companyId"];
   issueId: IssueAttachmentTableRow["issueId"];
-  issueCommentId: IssueAttachmentTableRow["issueCommentId"];
+  messagingMessageRefId: IssueAttachmentTableRow["messagingMessageRefId"];
   assetId: IssueAttachmentTableRow["assetId"];
   provider: AssetRow["provider"];
   objectKey: AssetRow["objectKey"];
@@ -163,7 +174,7 @@ export type PlannedIssueDocumentSkip = {
 export type PlannedAttachmentInsert = {
   source: IssueAttachmentRow;
   action: "insert";
-  targetIssueCommentId: string | null;
+  targetMessagingMessageRefId: string | null;
   targetCreatedByAgentId: string | null;
   adjustments: ImportAdjustment[];
 };
@@ -715,10 +726,9 @@ export function buildWorktreeMergePlan(input: {
     attachmentPlans.push({
       source: attachment,
       action: "insert",
-      targetIssueCommentId:
-        attachment.issueCommentId && commentIdsAvailableAfterImport.has(attachment.issueCommentId)
-          ? attachment.issueCommentId
-          : null,
+      // TODO(messaging-phase2): re-link attachments to imported messaging refs
+      // once the comment scope is migrated. Phase 1 drops the linkage on import.
+      targetMessagingMessageRefId: null,
       targetCreatedByAgentId,
       adjustments,
     });

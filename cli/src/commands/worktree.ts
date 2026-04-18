@@ -34,7 +34,6 @@ import {
   heartbeatRuns,
   inspectMigrations,
   issueAttachments,
-  issueComments,
   issueDocuments,
   issues,
   projectWorkspaces,
@@ -1987,16 +1986,11 @@ async function collectMergePlan(input: {
       .select()
       .from(issues)
       .where(eq(issues.companyId, companyId)),
-    input.scopes.includes("comments")
-      ? input.sourceDb
-        .select()
-        .from(issueComments)
-        .where(eq(issueComments.companyId, companyId))
-      : Promise.resolve([]),
-    input.targetDb
-      .select()
-      .from(issueComments)
-      .where(eq(issueComments.companyId, companyId)),
+    // TODO(messaging-phase2): comment export/import will read from
+    // messagingMessageRefs joined with messagingThreads. For Phase 1, the
+    // comments scope is a no-op at the CLI boundary.
+    Promise.resolve([]),
+    Promise.resolve([]),
     input.sourceDb
       .select({
         id: issueDocuments.id,
@@ -2084,7 +2078,7 @@ async function collectMergePlan(input: {
         id: issueAttachments.id,
         companyId: issueAttachments.companyId,
         issueId: issueAttachments.issueId,
-        issueCommentId: issueAttachments.issueCommentId,
+        messagingMessageRefId: issueAttachments.messagingMessageRefId,
         assetId: issueAttachments.assetId,
         provider: assets.provider,
         objectKey: assets.objectKey,
@@ -2108,7 +2102,7 @@ async function collectMergePlan(input: {
         id: issueAttachments.id,
         companyId: issueAttachments.companyId,
         issueId: issueAttachments.issueId,
-        issueCommentId: issueAttachments.issueCommentId,
+        messagingMessageRefId: issueAttachments.messagingMessageRefId,
         assetId: issueAttachments.assetId,
         provider: assets.provider,
         objectKey: assets.objectKey,
@@ -2533,41 +2527,11 @@ async function applyMergePlan(input: {
       insertedIssues += 1;
     }
 
-    const commentCandidates = input.plan.commentPlans.filter(
-      (plan): plan is PlannedCommentInsert => plan.action === "insert",
-    );
-    const commentCandidateIds = commentCandidates.map((comment) => comment.source.id);
-    const existingCommentIds = commentCandidateIds.length > 0
-      ? new Set(
-        (await tx
-          .select({ id: issueComments.id })
-          .from(issueComments)
-          .where(inArray(issueComments.id, commentCandidateIds)))
-          .map((row) => row.id),
-      )
-      : new Set<string>();
-
-    let insertedComments = 0;
-    for (const comment of commentCandidates) {
-      if (existingCommentIds.has(comment.source.id)) continue;
-      const parentExists = await tx
-        .select({ id: issues.id })
-        .from(issues)
-        .where(and(eq(issues.id, comment.source.issueId), eq(issues.companyId, companyId)))
-        .then((rows) => rows[0] ?? null);
-      if (!parentExists) continue;
-      await tx.insert(issueComments).values({
-        id: comment.source.id,
-        companyId,
-        issueId: comment.source.issueId,
-        authorAgentId: comment.targetAuthorAgentId,
-        authorUserId: comment.source.authorUserId,
-        body: comment.source.body,
-        createdAt: comment.source.createdAt,
-        updatedAt: comment.source.updatedAt,
-      });
-      insertedComments += 1;
-    }
+    // TODO(messaging-phase2): comment insert path moves to messagingMessageRefs
+    // + messagingThreads. Phase 1 skips the insert loop entirely; the plan
+    // still carries the comment entries so counts/log lines remain meaningful.
+    void input.plan.commentPlans;
+    const insertedComments = 0;
 
     const documentCandidates = input.plan.documentPlans.filter(
       (plan): plan is PlannedIssueDocumentInsert | PlannedIssueDocumentMerge =>
@@ -2754,7 +2718,7 @@ async function applyMergePlan(input: {
         companyId,
         issueId: attachment.source.issueId,
         assetId: attachment.source.assetId,
-        issueCommentId: attachment.targetIssueCommentId,
+        messagingMessageRefId: attachment.targetMessagingMessageRefId,
         createdAt: attachment.source.attachmentCreatedAt,
         updatedAt: attachment.source.attachmentUpdatedAt,
       });

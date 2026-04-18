@@ -485,7 +485,7 @@ describe("worktree merge history planner", () => {
     expect(plan.adjustments.clear_attachment_agent).toBe(1);
     expect(plan.attachmentPlans[0]).toMatchObject({
       action: "insert",
-      targetIssueCommentId: null,
+      targetMessagingMessageRefId: null,
       targetCreatedByAgentId: null,
     });
   });
