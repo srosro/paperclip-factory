@@ -115,7 +115,7 @@ describe("feedbackService.saveIssueVote", () => {
     svc = feedbackService(db);
     instance = started.instance;
     dataDir = started.dataDir;
-    ensureTestMessaging(db);
+    await ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {

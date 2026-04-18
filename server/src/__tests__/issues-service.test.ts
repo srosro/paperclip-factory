@@ -65,7 +65,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     db = createDb(tempDb.connectionString);
     svc = issueService(db);
     await ensureIssueRelationsTable(db);
-    ensureTestMessaging(db);
+    await ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {
@@ -752,7 +752,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     db = createDb(tempDb.connectionString);
     svc = issueService(db);
     await ensureIssueRelationsTable(db);
-    ensureTestMessaging(db);
+    await ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {
@@ -1030,7 +1030,7 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     db = createDb(tempDb.connectionString);
     svc = issueService(db);
     await ensureIssueRelationsTable(db);
-    ensureTestMessaging(db);
+    await ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {
@@ -1238,7 +1238,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     db = createDb(tempDb.connectionString);
     svc = issueService(db);
     await ensureIssueRelationsTable(db);
-    ensureTestMessaging(db);
+    await ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {
@@ -1516,7 +1516,7 @@ describeEmbeddedPostgres("issueService.findMentionedProjectIds", () => {
     db = createDb(tempDb.connectionString);
     svc = issueService(db);
     await ensureIssueRelationsTable(db);
-    ensureTestMessaging(db);
+    await ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {

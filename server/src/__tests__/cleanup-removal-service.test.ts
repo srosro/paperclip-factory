@@ -45,7 +45,7 @@ describeEmbeddedPostgres("cleanup removal services", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-cleanup-removal-");
     db = createDb(tempDb.connectionString);
-    ensureTestMessaging(db);
+    await ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {

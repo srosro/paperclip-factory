@@ -159,7 +159,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-recovery-");
     db = createDb(tempDb.connectionString);
-    ensureTestMessaging(db);
+    await ensureTestMessaging(db);
   }, 20_000);
 
   afterEach(async () => {

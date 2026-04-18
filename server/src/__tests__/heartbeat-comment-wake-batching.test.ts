@@ -232,7 +232,7 @@ describe("heartbeat comment wake batching", () => {
     db = createDb(started.connectionString);
     instance = started.instance;
     dataDir = started.dataDir;
-    ensureTestMessaging(db);
+    await ensureTestMessaging(db);
   }, 45_000);
 
   afterAll(async () => {

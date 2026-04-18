@@ -32,7 +32,7 @@ async function ensureAuthUser(db: Db, userId: string): Promise<void> {
 }
 
 // Re-initialize messaging for each test run with a fresh FakeAdapter echo.
-export function ensureTestMessaging(db: Db): void {
+export async function ensureTestMessaging(db: Db): Promise<void> {
   // Force a fresh adapter so per-test state does not leak across suites.
   try {
     messagingRegistry.unregister("fake");
@@ -40,7 +40,7 @@ export function ensureTestMessaging(db: Db): void {
     // no-op
   }
   resetMessagingForTests();
-  initMessaging({ db });
+  await initMessaging({ db });
 }
 
 export async function seedMessagingIdentity(

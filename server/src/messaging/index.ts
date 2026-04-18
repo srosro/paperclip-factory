@@ -1,8 +1,17 @@
+import { eq } from "drizzle-orm";
+import { messagingWorkspaceInstall } from "@paperclipai/db";
 import type { Db } from "./router.js";
 import { messagingRegistry } from "./registry.js";
 import { createMessagingRouter, type MessagingRouter } from "./router.js";
 import { createEventsProcessor, type EventsProcessor } from "./events.js";
 import { createFakeAdapter } from "./adapters/fake/adapter.js";
+import { createSlackAdapter } from "./adapters/slack/adapter.js";
+import { resolveSlackMentions } from "./adapters/slack/mention-parser.js";
+import { rewriteOutboundBodyForSlack } from "./adapters/slack/mention-parser.js";
+import {
+  getBotTokenForCompany,
+  getUserTokenBySecretId,
+} from "./adapters/slack/token-store.js";
 import type { BackendKey } from "./types.js";
 
 export { messagingRegistry };
@@ -28,9 +37,18 @@ export interface InitMessagingArgs {
   }) => Promise<void>;
   resolveMentions?: (rawBody: string) => Promise<string[]>;
   issueUrlBase?: string;
+  /**
+   * Slack adapter token resolvers. When provided, a SlackAdapter is
+   * registered alongside the FakeAdapter so the Slack webhook + router can
+   * use it. Per-company token lookups are routed through these.
+   */
+  slack?: {
+    getBotToken: (companyId: string) => Promise<string>;
+    getUserToken: (companyId: string, secretId: string) => Promise<string>;
+  };
 }
 
-export function initMessaging(args: InitMessagingArgs): void {
+export async function initMessaging(args: InitMessagingArgs): Promise<void> {
   currentBackend = args.backend ?? "fake";
   // Register FakeAdapter if not already present (idempotent by swallowing dup-register).
   try {
@@ -38,17 +56,58 @@ export function initMessaging(args: InitMessagingArgs): void {
   } catch {
     // already registered
   }
+
+  // Register SlackAdapter when Slack env is configured. Phase 1 pins the
+  // adapter to the single workspace install if exactly one exists; Phase 2
+  // will switch to per-request scoping.
+  if (args.slack) {
+    try {
+      messagingRegistry.unregister("slack");
+    } catch {
+      // no-op
+    }
+    let pinnedCompanyId: string | undefined;
+    try {
+      const installs = await args.db
+        .select({ companyId: messagingWorkspaceInstall.companyId })
+        .from(messagingWorkspaceInstall)
+        .where(eq(messagingWorkspaceInstall.backend, "slack"))
+        .limit(2);
+      if (installs.length === 1) {
+        pinnedCompanyId = installs[0]!.companyId;
+      }
+    } catch {
+      // Table may not exist in extremely old dev DBs — leave unpinned.
+    }
+
+    const slackAdapter = createSlackAdapter({
+      getBotToken: args.slack.getBotToken,
+      getUserToken: args.slack.getUserToken,
+      companyId: pinnedCompanyId,
+      rewriteOutboundBody: (cid, body) =>
+        rewriteOutboundBodyForSlack(args.db, cid, body),
+    });
+    messagingRegistry.register(slackAdapter);
+  }
+
   router = createMessagingRouter({
     db: args.db,
     registry: messagingRegistry,
     backend: currentBackend,
     issueUrlBase: args.issueUrlBase,
   });
+
+  const resolveMentions =
+    args.resolveMentions ??
+    (currentBackend === "slack"
+      ? (body: string) => resolveSlackMentions(args.db, body)
+      : undefined);
+
   events = createEventsProcessor({
     db: args.db,
     backend: currentBackend,
     onMessageCreated: args.onMessageCreated,
-    resolveMentions: args.resolveMentions,
+    resolveMentions,
   });
 
   // Wire adapter echo → events processor (for FakeAdapter in local/dev).
@@ -66,6 +125,18 @@ export function initMessaging(args: InitMessagingArgs): void {
   }
 
   initialized = true;
+}
+
+/**
+ * Build the default Slack token resolvers over a Db. The runtime wires this
+ * directly in app startup; tests wire their own resolvers.
+ */
+export function defaultSlackResolvers(db: Db) {
+  return {
+    getBotToken: (companyId: string) => getBotTokenForCompany(db, companyId),
+    getUserToken: (companyId: string, secretId: string) =>
+      getUserTokenBySecretId(db, companyId, secretId),
+  };
 }
 
 export function resetMessagingForTests(): void {
