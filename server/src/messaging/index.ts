@@ -1,6 +1,12 @@
 import { eq } from "drizzle-orm";
-import { messagingWorkspaceInstall } from "@paperclipai/db";
+import {
+  assets,
+  issueAttachments,
+  messagingWorkspaceInstall,
+} from "@paperclipai/db";
+import type { Readable } from "node:stream";
 import type { Db } from "./router.js";
+import type { StorageService } from "../storage/types.js";
 import { messagingRegistry } from "./registry.js";
 import { createMessagingRouter, type MessagingRouter } from "./router.js";
 import { createEventsProcessor, type EventsProcessor } from "./events.js";
@@ -45,6 +51,15 @@ export interface InitMessagingArgs {
   slack?: {
     getBotToken: (companyId: string) => Promise<string>;
     getUserToken: (companyId: string, secretId: string) => Promise<string>;
+    /**
+     * Resolve raw bytes for a Paperclip attachment. Used by the Slack adapter
+     * when postMessage carries inline attachments. Optional; if omitted, the
+     * adapter throws when asked to upload.
+     */
+    getAttachmentBytes?: (
+      companyId: string,
+      paperclipAttachmentId: string,
+    ) => Promise<Buffer>;
   };
 }
 
@@ -86,6 +101,7 @@ export async function initMessaging(args: InitMessagingArgs): Promise<void> {
       companyId: pinnedCompanyId,
       rewriteOutboundBody: (cid, body) =>
         rewriteOutboundBodyForSlack(args.db, cid, body),
+      getAttachmentBytes: args.slack.getAttachmentBytes,
     });
     messagingRegistry.register(slackAdapter);
   }
@@ -127,15 +143,56 @@ export async function initMessaging(args: InitMessagingArgs): Promise<void> {
   initialized = true;
 }
 
+async function streamToBuffer(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(
+      typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer),
+    );
+  }
+  return Buffer.concat(chunks);
+}
+
+async function resolveAttachmentBytes(
+  db: Db,
+  storage: StorageService,
+  companyId: string,
+  paperclipAttachmentId: string,
+): Promise<Buffer> {
+  const rows = await db
+    .select({
+      companyId: issueAttachments.companyId,
+      objectKey: assets.objectKey,
+    })
+    .from(issueAttachments)
+    .innerJoin(assets, eq(issueAttachments.assetId, assets.id))
+    .where(eq(issueAttachments.id, paperclipAttachmentId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) throw new Error(`attachment ${paperclipAttachmentId} not found`);
+  if (row.companyId !== companyId) {
+    throw new Error(
+      `attachment ${paperclipAttachmentId} company mismatch (expected ${companyId}, got ${row.companyId})`,
+    );
+  }
+  const object = await storage.getObject(row.companyId, row.objectKey);
+  return streamToBuffer(object.stream);
+}
+
 /**
  * Build the default Slack token resolvers over a Db. The runtime wires this
- * directly in app startup; tests wire their own resolvers.
+ * directly in app startup; tests wire their own resolvers. Pass a storage
+ * service to enable outbound attachment uploads from Paperclip's blob store.
  */
-export function defaultSlackResolvers(db: Db) {
+export function defaultSlackResolvers(db: Db, storage?: StorageService) {
   return {
     getBotToken: (companyId: string) => getBotTokenForCompany(db, companyId),
     getUserToken: (companyId: string, secretId: string) =>
       getUserTokenBySecretId(db, companyId, secretId),
+    getAttachmentBytes: storage
+      ? (companyId: string, paperclipAttachmentId: string) =>
+          resolveAttachmentBytes(db, storage, companyId, paperclipAttachmentId)
+      : undefined,
   };
 }
 

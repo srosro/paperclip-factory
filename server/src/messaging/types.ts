@@ -138,11 +138,29 @@ export interface MessagingAdapter {
   lockThread(threadRef: ExternalRef): Promise<void>;
 
   // Messages
-  postMessage(args: PostMessageArgs): Promise<{ messageRef: ExternalRef; createdAt: Date }>;
+  postMessage(args: PostMessageArgs): Promise<{
+    messageRef: ExternalRef;
+    createdAt: Date;
+    slackFileIds?: string[];
+  }>;
   editMessage(channelRef: ExternalRef, messageRef: ExternalRef, body: string, blocks?: unknown): Promise<void>;
   deleteMessage(channelRef: ExternalRef, messageRef: ExternalRef, by: AuthorIdentity): Promise<void>;
   getThreadMessages(channelRef: ExternalRef, threadRef: ExternalRef): Promise<Message[]>;
   getMessage(channelRef: ExternalRef, messageRef: ExternalRef): Promise<Message | null>;
+  /**
+   * Optional: upload a file to a thread on behalf of an identity. Only
+   * adapters advertising `supportsFileUpload` implement this meaningfully.
+   * Returns the backend's file id so callers can persist it on the ref's
+   * metadata for later correlation.
+   */
+  uploadAttachmentToThread?(args: {
+    channelRef: ExternalRef;
+    threadRef: ExternalRef;
+    by: AuthorIdentity;
+    filename: string;
+    contentType: string;
+    body: Buffer;
+  }): Promise<{ slackFileId: string | null }>;
 
   // Identities
   provisionAgentIdentity(args: ProvisionAgentIdentityArgs): Promise<ProvisionResult>;

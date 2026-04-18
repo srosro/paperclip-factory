@@ -37,6 +37,15 @@ export interface SlackDeps {
    * Part 9 wires this to GFM→mrkdwn + agent-name→<@Uxxx> resolution.
    */
   rewriteOutboundBody?: (companyId: string, body: string) => Promise<string>;
+  /**
+   * Resolve the raw bytes for a Paperclip attachment so the adapter can
+   * upload them to Slack's files API. Required when postMessage is called
+   * with `args.attachments` or when `uploadAttachmentToThread` is called.
+   */
+  getAttachmentBytes?: (
+    companyId: string,
+    paperclipAttachmentId: string,
+  ) => Promise<Buffer>;
 }
 
 const capabilities: CapabilityFlags = {
@@ -110,6 +119,34 @@ function normalizeSlackFiles(files: SlackFilePayload[] | undefined): IncomingFil
     });
   }
   return refs.length > 0 ? refs : undefined;
+}
+
+async function uploadFileToSlackThread(
+  client: import("@slack/web-api").WebClient,
+  args: {
+    channelRef: string;
+    threadRef: string;
+    filename: string;
+    contentType: string;
+    body: Buffer;
+  },
+): Promise<string | null> {
+  const res = await withRetry(() =>
+    client.files.uploadV2({
+      channel_id: args.channelRef,
+      thread_ts: args.threadRef,
+      filename: args.filename,
+      file: args.body,
+    }),
+  );
+  // uploadV2 returns { ok, files: [{ id, ... }] } in modern SDKs. Normalize.
+  const files = (res as { files?: Array<{ id?: string; files?: Array<{ id?: string }> }> }).files ?? [];
+  for (const entry of files) {
+    if (entry.id) return entry.id;
+    const nested = entry.files?.[0]?.id;
+    if (nested) return nested;
+  }
+  return null;
 }
 
 function payloadToMessage(payload: SlackMessagePayload, threadRef: string): Message | null {
@@ -222,6 +259,7 @@ export function createSlackAdapter(deps: SlackDeps): MessagingAdapter {
     async postMessage(args: PostMessageArgs): Promise<{
       messageRef: ExternalRef;
       createdAt: Date;
+      slackFileIds?: string[];
     }> {
       const client = await clientForIdentity(args.authorIdentity);
       const rewritten = deps.rewriteOutboundBody
@@ -237,7 +275,56 @@ export function createSlackAdapter(deps: SlackDeps): MessagingAdapter {
       );
       const ts = (res as { ts?: string }).ts;
       if (!ts) throw new Error("slack postMessage: no ts returned");
-      return { messageRef: ts, createdAt: tsToDate(ts) };
+
+      const slackFileIds: string[] = [];
+      if (args.attachments && args.attachments.length > 0) {
+        if (!deps.getAttachmentBytes) {
+          throw new Error(
+            "slack adapter: postMessage received attachments but no getAttachmentBytes dep was provided",
+          );
+        }
+        const companyId = requireCompanyId(deps);
+        const threadTs = args.threadRef ?? ts;
+        for (const att of args.attachments) {
+          const bytes = await deps.getAttachmentBytes(
+            companyId,
+            att.paperclipAttachmentId,
+          );
+          const uploaded = await uploadFileToSlackThread(client, {
+            channelRef: args.channelRef,
+            threadRef: threadTs,
+            filename: att.filename,
+            contentType: att.contentType,
+            body: bytes,
+          });
+          if (uploaded) slackFileIds.push(uploaded);
+        }
+      }
+
+      return {
+        messageRef: ts,
+        createdAt: tsToDate(ts),
+        slackFileIds: slackFileIds.length > 0 ? slackFileIds : undefined,
+      };
+    },
+
+    async uploadAttachmentToThread(args: {
+      channelRef: ExternalRef;
+      threadRef: ExternalRef;
+      by: AuthorIdentity;
+      filename: string;
+      contentType: string;
+      body: Buffer;
+    }): Promise<{ slackFileId: string | null }> {
+      const client = await clientForIdentity(args.by);
+      const slackFileId = await uploadFileToSlackThread(client, {
+        channelRef: args.channelRef,
+        threadRef: args.threadRef,
+        filename: args.filename,
+        contentType: args.contentType,
+        body: args.body,
+      });
+      return { slackFileId };
     },
 
     async editMessage(

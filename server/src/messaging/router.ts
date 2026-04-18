@@ -3,6 +3,7 @@ import type {
   BackendKey,
   AuthorIdentity,
   AdapterCredential,
+  AttachmentRef,
   MessagingAdapter,
 } from "./types.js";
 import { MessagingIdentityNotActive, MessagingThreadLocked } from "./types.js";
@@ -45,6 +46,21 @@ export interface RouterPostArgs {
   body: string;
   createdByRunId?: string;
   blocks?: unknown;
+  /**
+   * Optional: Paperclip attachments to upload into the Slack thread after
+   * the comment posts. Requires the configured adapter to advertise
+   * `supportsFileUpload`; otherwise the adapter ignores them.
+   */
+  attachments?: AttachmentRef[];
+}
+
+export interface UploadAttachmentArgs {
+  refId: string;
+  authorAgentId?: string;
+  authorUserId?: string;
+  filename: string;
+  contentType: string;
+  body: Buffer;
 }
 
 export interface RouterReadMessage {
@@ -76,6 +92,16 @@ export interface MessagingRouter {
     id: string;
     externalMessageRef: string;
     createdAt: Date;
+  }>;
+  /**
+   * Upload an attachment's bytes into the Slack thread the given message ref
+   * belongs to. Used by the retroactive attachment-upload HTTP route — agents
+   * post a comment first, then POST /attachments with an issueCommentId. This
+   * method ships the bytes to the same thread and records the file id on the
+   * ref's metadata.
+   */
+  uploadAttachmentToMessage(args: UploadAttachmentArgs): Promise<{
+    slackFileId: string | null;
   }>;
   getThreadMessages(args: {
     issueId: string;
@@ -343,7 +369,13 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         authorIdentity,
         body: args.body,
         blocks: args.blocks,
+        attachments: args.attachments,
       });
+
+      const metadata: Record<string, unknown> | null =
+        posted.slackFileIds && posted.slackFileIds.length > 0
+          ? { slackFileIds: posted.slackFileIds }
+          : null;
 
       const [inserted] = await deps.db
         .insert(messagingMessageRefs)
@@ -354,6 +386,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
           authorAgentId: args.authorAgentId ?? null,
           authorUserId: args.authorUserId ?? null,
           createdByRunId: args.createdByRunId ?? null,
+          metadata,
         })
         .onConflictDoUpdate({
           target: [
@@ -364,6 +397,7 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
             authorAgentId: args.authorAgentId ?? null,
             authorUserId: args.authorUserId ?? null,
             createdByRunId: args.createdByRunId ?? null,
+            ...(metadata ? { metadata } : {}),
           },
         })
         .returning();
@@ -372,6 +406,75 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
         externalMessageRef: inserted!.externalMessageRef,
         createdAt: posted.createdAt,
       };
+    },
+
+    async uploadAttachmentToMessage(args) {
+      const rows = await deps.db
+        .select()
+        .from(messagingMessageRefs)
+        .where(eq(messagingMessageRefs.id, args.refId))
+        .limit(1);
+      const ref = rows[0];
+      if (!ref) throw new Error(`message ref ${args.refId} not found`);
+      if (ref.backend !== deps.backend) return { slackFileId: null };
+
+      const threadRows = await deps.db
+        .select()
+        .from(messagingThreads)
+        .where(eq(messagingThreads.id, ref.threadId))
+        .limit(1);
+      const thread = threadRows[0];
+      if (!thread) throw new Error(`thread ${ref.threadId} not found`);
+      const channel = await loadChannel(thread.channelId);
+      if (!channel) throw new Error(`channel for thread ${thread.id} not found`);
+
+      const adapter = await requireAdapter();
+      if (!adapter.uploadAttachmentToThread) return { slackFileId: null };
+
+      let authorIdentity: AuthorIdentity;
+      if (!args.authorAgentId && !args.authorUserId) {
+        authorIdentity = {
+          backend: deps.backend,
+          externalUserRef: "SYSTEM",
+          credential: { kind: "none" },
+        };
+      } else {
+        const identity = await loadIdentity({
+          companyId: channel.companyId,
+          agentId: args.authorAgentId,
+          userId: args.authorUserId,
+        });
+        if (!identity || identity.state !== "active") {
+          throw new MessagingIdentityNotActive(identity?.id ?? "none");
+        }
+        authorIdentity = {
+          backend: deps.backend,
+          externalUserRef: identity.externalUserRef,
+          credential: buildCredential(identity),
+        };
+      }
+
+      const uploaded = await adapter.uploadAttachmentToThread({
+        channelRef: channel.externalChannelRef,
+        threadRef: thread.externalThreadRef,
+        by: authorIdentity,
+        filename: args.filename,
+        contentType: args.contentType,
+        body: args.body,
+      });
+
+      if (uploaded.slackFileId) {
+        const existingMeta = (ref.metadata ?? {}) as Record<string, unknown>;
+        const existingIds = Array.isArray(existingMeta.slackFileIds)
+          ? (existingMeta.slackFileIds as string[])
+          : [];
+        const mergedIds = [...existingIds, uploaded.slackFileId];
+        await deps.db
+          .update(messagingMessageRefs)
+          .set({ metadata: { ...existingMeta, slackFileIds: mergedIds } })
+          .where(eq(messagingMessageRefs.id, ref.id));
+      }
+      return { slackFileId: uploaded.slackFileId };
     },
 
     async getThreadMessages({ issueId, afterRefId }) {

@@ -65,6 +65,10 @@ import {
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
 } from "../services/issue-execution-policy.js";
+import {
+  getMessagingRouter,
+  isMessagingInitialized,
+} from "../messaging/index.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -2703,6 +2707,28 @@ export function issueRoutes(
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
     });
+
+    // If this attachment is linked to an existing messaging ref and the
+    // configured backend supports file upload, ship the bytes to the same
+    // thread so the file renders in-line. Best effort: surface but don't
+    // fail the HTTP request on Slack errors.
+    if (parsedMeta.data.issueCommentId && isMessagingInitialized()) {
+      try {
+        await getMessagingRouter().uploadAttachmentToMessage({
+          refId: parsedMeta.data.issueCommentId,
+          authorAgentId: actor.agentId ?? undefined,
+          authorUserId: actor.actorType === "user" ? actor.actorId : undefined,
+          filename: attachment.originalFilename ?? `attachment-${attachment.id}`,
+          contentType: attachment.contentType,
+          body: file.buffer,
+        });
+      } catch (err) {
+        logger.warn(
+          { err, issueId, attachmentId: attachment.id },
+          "messaging: upload attachment to backend thread failed",
+        );
+      }
+    }
 
     await logActivity(db, {
       companyId,
