@@ -18,6 +18,7 @@ import {
   getBotTokenForCompany,
   getUserTokenBySecretId,
 } from "./adapters/slack/token-store.js";
+import { createSlackFileIngest } from "./adapters/slack/file-ingest.js";
 import type { BackendKey } from "./types.js";
 
 export { messagingRegistry };
@@ -32,6 +33,12 @@ let currentBackend: BackendKey = "fake";
 export interface InitMessagingArgs {
   db: Db;
   backend?: BackendKey;
+  /**
+   * Storage service for asset/attachment round-trip. Required when slack is
+   * configured and inbound file ingestion / outbound attachment upload are
+   * desired. When omitted, messaging still functions — attachments are no-op.
+   */
+  storage?: StorageService;
   /** Called after a new inbound message is persisted and not suppressed. */
   onMessageCreated?: (args: {
     refId: string;
@@ -119,11 +126,17 @@ export async function initMessaging(args: InitMessagingArgs): Promise<void> {
       ? (body: string) => resolveSlackMentions(args.db, body)
       : undefined);
 
+  const ingestInboundFiles =
+    currentBackend === "slack" && args.storage
+      ? createSlackFileIngest({ db: args.db, storage: args.storage })
+      : undefined;
+
   events = createEventsProcessor({
     db: args.db,
     backend: currentBackend,
     onMessageCreated: args.onMessageCreated,
     resolveMentions,
+    ingestInboundFiles,
   });
 
   // Wire adapter echo → events processor (for FakeAdapter in local/dev).

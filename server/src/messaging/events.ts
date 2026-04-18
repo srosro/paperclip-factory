@@ -6,8 +6,16 @@ import {
   messagingMessageRefs,
   messagingEventsInbox,
 } from "@paperclipai/db";
-import type { BackendKey, MessagingEvent } from "./types.js";
+import type { BackendKey, IncomingFileRef, MessagingEvent } from "./types.js";
 import type { Db } from "./router.js";
+
+export interface IngestInboundFilesArgs {
+  companyId: string;
+  issueId: string;
+  refId: string;
+  authorExternalRef: string;
+  files: IncomingFileRef[];
+}
 
 export interface EventsDeps {
   db: Db;
@@ -30,6 +38,14 @@ export interface EventsDeps {
    * expects a list of Paperclip agent ids.
    */
   resolveMentions?: (rawBody: string) => Promise<string[]>;
+  /**
+   * Optional: backend-specific file ingest. Called for each inbound message
+   * that carries files. The implementation must download bytes (using a user
+   * token when needed), register assets, and insert issue_attachments rows.
+   * Errors must be logged and swallowed — partial ingest is preferable to
+   * dropping the whole event.
+   */
+  ingestInboundFiles?: (args: IngestInboundFilesArgs) => Promise<void>;
 }
 
 export interface EventsProcessor {
@@ -117,6 +133,27 @@ async function handleNewMessage(
     })
     .returning();
   if (!row) return; // already existed (agent-write path already inserted)
+
+  // Ingest any inbound files (Slack attachments) before wake-up hooks so the
+  // wake-up signal observes the full state. Errors must be swallowed so
+  // wake-up still fires when file ingest fails.
+  if (event.files && event.files.length > 0 && deps.ingestInboundFiles) {
+    try {
+      await deps.ingestInboundFiles({
+        companyId: channel.companyId,
+        issueId: thread.issueId,
+        refId: row.id,
+        authorExternalRef: event.authorExternalRef,
+        files: event.files,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `messaging: ingestInboundFiles failed for ref=${row.id}`,
+        err,
+      );
+    }
+  }
 
   if (row.suppressedForWake) return;
 

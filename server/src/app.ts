@@ -139,6 +139,7 @@ export async function createApp(
   await initMessaging({
     db,
     backend: slackBackendConfigured ? "slack" : "fake",
+    storage: opts.storageService,
     slack: slackBackendConfigured
       ? defaultSlackResolvers(db, opts.storageService)
       : undefined,
