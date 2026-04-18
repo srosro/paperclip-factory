@@ -7,7 +7,6 @@ import {
   messagingWorkspaceInstall,
 } from "@paperclipai/db";
 import { slackClient, withRetry } from "./adapters/slack/client.js";
-import { messagingRegistry } from "./registry.js";
 import type { Db } from "./router.js";
 
 /**
@@ -328,6 +327,12 @@ export interface NotifyInboxArgs {
   event: InboxEvent;
   api?: SlackInboxApi;
   nowMs?: () => number;
+  /**
+   * Test injection point for the bot token + workspace team id. When omitted,
+   * both are resolved from the company's messaging_workspace_install row + the
+   * Slack token store. Tests skip the install row and inject directly.
+   */
+  workspace?: { botToken: string; teamId: string };
 }
 
 export interface NotifyInboxResult {
@@ -392,33 +397,31 @@ export async function notifyInbox(
     return { posted: false, edited: false, channelId: null, reason: "pref_disabled" };
   }
 
-  // Workspace install gives us the bot token + the team id for deep links.
-  const [install] = await db
-    .select()
-    .from(messagingWorkspaceInstall)
-    .where(
-      and(
-        eq(messagingWorkspaceInstall.backend, BACKEND),
-        eq(messagingWorkspaceInstall.companyId, args.companyId),
-      ),
-    )
-    .limit(1);
-  if (!install) {
-    return { posted: false, edited: false, channelId: null, reason: "no_install" };
+  // Resolve bot token + workspace team id. Tests inject directly; prod reads
+  // from the company's workspace install + the Slack token store.
+  let botToken: string;
+  let teamId: string;
+  if (args.workspace) {
+    botToken = args.workspace.botToken;
+    teamId = args.workspace.teamId;
+  } else {
+    const [install] = await db
+      .select()
+      .from(messagingWorkspaceInstall)
+      .where(
+        and(
+          eq(messagingWorkspaceInstall.backend, BACKEND),
+          eq(messagingWorkspaceInstall.companyId, args.companyId),
+        ),
+      )
+      .limit(1);
+    if (!install) {
+      return { posted: false, edited: false, channelId: null, reason: "no_install" };
+    }
+    teamId = install.externalWorkspaceRef;
+    const { getBotTokenForCompany } = await import("./adapters/slack/token-store.js");
+    botToken = await getBotTokenForCompany(db, args.companyId);
   }
-
-  // The adapter knows how to resolve the bot token through its injected dep.
-  // We reach through the registered adapter to reuse that token path without
-  // re-implementing the resolver here.
-  const adapter = messagingRegistry.get(BACKEND);
-  if (!adapter) {
-    return { posted: false, edited: false, channelId: null, reason: "no_adapter" };
-  }
-  // Token resolution happens via the adapter's internal state — we don't need
-  // to call anything; we just ask the real Slack API via our `api` dep, which
-  // takes a bot token. Fetch it from the store here.
-  const { getBotTokenForCompany } = await import("./adapters/slack/token-store.js");
-  const botToken = await getBotTokenForCompany(db, args.companyId);
 
   // Get-or-open DM channel.
   let [channel] = await db
@@ -479,7 +482,7 @@ export async function notifyInbox(
   const sameIssue = !!issueId && meta.lastIssueId === issueId;
 
   const deepLinkUrl = buildDeepLink({
-    teamId: install.externalWorkspaceRef,
+    teamId,
     channelId: channel.externalChannelRef,
   });
 

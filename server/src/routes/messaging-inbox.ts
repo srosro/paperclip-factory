@@ -6,9 +6,12 @@ import { validate } from "../middleware/validate.js";
 import { assertCompanyAccess } from "./authz.js";
 import { getInboxPreferences, setInboxPreferences } from "../messaging/inbox.js";
 
-const patchSchema = z.object({
-  prefs: z.record(z.string(), z.boolean()),
-});
+const patchSchema = z
+  .object({
+    companyId: z.string().optional(),
+    prefs: z.record(z.string(), z.boolean()),
+  })
+  .passthrough();
 
 function resolveActorUserId(req: Request): string {
   if (req.actor.type !== "board") {
