@@ -397,14 +397,28 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
           agentId: args.authorAgentId,
           userId: args.authorUserId,
         });
-        if (!identity || identity.state !== "active") {
-          throw new MessagingIdentityNotActive(identity?.id ?? "none");
+        if (!identity) {
+          // No identity linked yet: fall back to bot_system authoring so
+          // newly-hired agents can post before Slack OAuth is completed.
+          // The ref row still attributes the agent; only the Slack-visible
+          // author becomes the workspace bot principal.
+          authorIdentity = {
+            backend: deps.backend,
+            externalUserRef: "SYSTEM",
+            credential:
+              deps.backend === "slack" ? { kind: "bot_token" } : { kind: "none" },
+          };
+        } else if (identity.state !== "active") {
+          // Identity exists but pending_auth / revoked — that's a real
+          // configuration bug, surface it instead of silently downgrading.
+          throw new MessagingIdentityNotActive(identity.id);
+        } else {
+          authorIdentity = {
+            backend: deps.backend,
+            externalUserRef: identity.externalUserRef,
+            credential: buildCredential(identity),
+          };
         }
-        authorIdentity = {
-          backend: deps.backend,
-          externalUserRef: identity.externalUserRef,
-          credential: buildCredential(identity),
-        };
       }
 
 

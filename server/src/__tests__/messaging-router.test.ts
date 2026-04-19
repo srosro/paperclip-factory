@@ -169,18 +169,39 @@ describeIf("messaging router", () => {
     expect(row!.authorAgentId).toBe(s.agentId);
   });
 
-  it("postMessage throws MessagingIdentityNotActive when identity is missing", async () => {
+  it("postMessage falls back to bot_system authoring when identity is missing", async () => {
+    // Before Slack OAuth completes for a newly-hired agent, the agent has no
+    // messaging_identities row. The router falls back to bot_system rather
+    // than throwing, so the org stays functional while onboarding catches up.
+    // The ref row still records the agent id.
     const s = await seed(db);
     const adapter = createFakeAdapter();
     const router = createMessagingRouter({ db, adapter, backend: "fake" });
 
+    const posted = await router.postMessage({
+      companyId: s.companyId,
+      issueId: s.issueId,
+      projectId: s.projectId,
+      authorAgentId: s.agentId,
+      body: "no identity yet",
+    });
+    expect(posted.id).toBeTruthy();
+
+    // A pending_auth identity is a misconfiguration and still throws.
+    await db.insert(messagingIdentities).values({
+      companyId: s.companyId,
+      agentId: s.agentId,
+      backend: "fake",
+      externalUserRef: "U_pending",
+      state: "pending_auth",
+    });
     await expect(
       router.postMessage({
         companyId: s.companyId,
         issueId: s.issueId,
         projectId: s.projectId,
         authorAgentId: s.agentId,
-        body: "no identity",
+        body: "pending auth",
       }),
     ).rejects.toBeInstanceOf(MessagingIdentityNotActive);
   });
