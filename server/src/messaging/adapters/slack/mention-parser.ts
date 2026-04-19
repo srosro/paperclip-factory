@@ -112,16 +112,37 @@ export async function resolveSlackMentions(
 }
 
 /**
- * Outbound body rewrite combining GFM→mrkdwn translation and @name→<@Uxxx>
- * mention resolution. Drop-in for `SlackDeps.rewriteOutboundBody`.
+ * Match Slack-style pseudo-link emitted by agents: `<path|label>` where path
+ * is absolute (starts with `/`). Slack only renders `<url|label>` when the
+ * first part is an actual URL, so these show up as raw text otherwise.
+ */
+const INTERNAL_PSEUDO_LINK_RE = /<(\/[^|>\s]+)\|([^>]+)>/g;
+
+function rewritePseudoLinks(body: string, publicBaseUrl: string): string {
+  const trimmed = publicBaseUrl.replace(/\/+$/, "");
+  return body.replace(INTERNAL_PSEUDO_LINK_RE, (_full, path: string, label: string) => {
+    return `<${trimmed}${path}|${label}>`;
+  });
+}
+
+/**
+ * Outbound body rewrite combining GFM→mrkdwn translation, @name→<@Uxxx>
+ * mention resolution, and internal-path link expansion. Drop-in for
+ * `SlackDeps.rewriteOutboundBody`. The optional publicBaseUrl is used to
+ * promote agent-emitted `</path|label>` references to fully-qualified
+ * `<https://host/path|label>` so Slack renders them as links.
  */
 export async function rewriteOutboundBodyForSlack(
   db: Db,
   companyId: string,
   body: string,
+  publicBaseUrl?: string,
 ): Promise<string> {
   const withMentions = await toExternalMentions(db, companyId, body);
-  return fromGfm(withMentions);
+  const withLinks = publicBaseUrl
+    ? rewritePseudoLinks(withMentions, publicBaseUrl)
+    : withMentions;
+  return fromGfm(withLinks);
 }
 
 /**

@@ -241,7 +241,7 @@ function buildSlackContext(
     getUserToken: bootstrap.slack.getUserToken,
     companyId,
     rewriteOutboundBody: (cid, body) =>
-      rewriteOutboundBodyForSlack(bootstrap.db, cid, body),
+      rewriteOutboundBodyForSlack(bootstrap.db, cid, body, bootstrap.issueUrlBase),
     getAttachmentBytes: bootstrap.slack.getAttachmentBytes,
   });
   const router = createMessagingRouter({

@@ -140,12 +140,22 @@ export async function createApp(
       process.env.SLACK_APP_CLIENT_SECRET &&
       process.env.SLACK_SIGNING_SECRET,
   );
+  // Public base URL for in-body link rewrites. Agents emit Slack-style
+  // `</path|label>` with absolute Paperclip paths; the outbound rewriter
+  // prefixes this host so Slack renders them as real links. Prefer the Slack
+  // OAuth redirect base (set when Paperclip is fronted by a tunnel/domain),
+  // fall back to the local bind so single-host deployments still work.
+  const publicBaseUrl =
+    process.env.SLACK_OAUTH_REDIRECT_BASE_URL ||
+    process.env.PAPERCLIP_PUBLIC_BASE_URL ||
+    `http://${opts.bindHost}:${process.env.PAPERCLIP_LISTEN_PORT ?? 3100}`;
   initMessaging({
     db,
     storage: opts.storageService,
     slack: slackEnvConfigured
       ? defaultSlackResolvers(db, opts.storageService)
       : undefined,
+    issueUrlBase: publicBaseUrl,
     // onMessageCreated is the single hook that inbound events fire after a
     // ref row is persisted. It feeds the unified side-effect pipeline so
     // inbound Slack comments wake assignees + mentioned agents and DM
