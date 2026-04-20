@@ -187,6 +187,45 @@ describeIf("issue-tracker router", () => {
     ).rejects.toBeInstanceOf(MessagingIdentityNotActive);
   });
 
+  it("syncIssueToExternal — idempotent: returns existing ref without calling createIssue", async () => {
+    const s = await seed(db);
+    const adapter = createFakeAdapter();
+    // adapter has no issues yet — createIssue would add one
+    const issueCountBefore = adapter.state.issuesByRef.size;
+    const router = createIssueTrackerRouter({ db, adapter, backend: "fake" });
+
+    const result = await router.syncIssueToExternal(s.issueId);
+
+    expect(result.externalIssueRef).toBe(s.linearIssueId);
+    // No call to adapter.createIssue
+    expect(adapter.state.issuesByRef.size).toBe(issueCountBefore);
+  });
+
+  it("syncIssueToExternal — mint: creates external issue and persists linearIssueId", async () => {
+    const s = await seed(db);
+    // Clear linearIssueId so the mint path fires
+    await db
+      .update(issues)
+      .set({ linearIssueId: null, linearIssueIdentifier: null })
+      .where(eq(issues.id, s.issueId));
+
+    const adapter = createFakeAdapter();
+    const router = createIssueTrackerRouter({ db, adapter, backend: "fake" });
+
+    const result = await router.syncIssueToExternal(s.issueId);
+
+    // Adapter was called and returned a new ref
+    expect(result.externalIssueRef).toBeTruthy();
+    expect(adapter.state.issuesByRef.has(result.externalIssueRef)).toBe(true);
+
+    // DB row updated
+    const [row] = await db.select().from(issues).where(eq(issues.id, s.issueId)).limit(1);
+    expect(row!.linearIssueId).toBe(result.externalIssueRef);
+
+    // Returned value matches DB
+    expect(result.externalIssueRef).toBe(row!.linearIssueId);
+  });
+
   it("getComments returns refs zipped with live adapter bodies", async () => {
     const s = await seed(db);
     const adapter = createFakeAdapter();
