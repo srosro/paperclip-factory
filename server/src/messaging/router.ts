@@ -91,6 +91,13 @@ export interface IssueTrackerRouter {
     issueId: string;
     afterRefId?: string;
   }): Promise<RouterReadComment[]>;
+  /**
+   * Ensures a locally-created issue exists in the external tracker.
+   * Creates the external issue if the local row has no linearIssueId yet,
+   * then updates the local row with the returned external ref.
+   * Returns the external ref (existing or newly created).
+   */
+  syncIssueToExternal(issueId: string): Promise<{ externalIssueRef: string; identifier: string }>;
 }
 
 function buildCredential(row: { authBlobSecretId: string | null }) {
@@ -327,6 +334,14 @@ export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
         .limit(1);
       if (!ref) return;
       await adapter.deleteComment(ref.externalMessageRef, args.by);
+    },
+
+    async syncIssueToExternal(issueId: string) {
+      const result = await ensureExternalIssue(issueId);
+      return {
+        externalIssueRef: result.externalIssueRef,
+        identifier: result.issueRow.linearIssueIdentifier ?? result.externalIssueRef,
+      };
     },
 
     async getComments({ issueId, afterRefId }) {
