@@ -84,9 +84,13 @@ export function messagingLinearRoutes(db: Db): Router {
     const companyId = (req.query.companyId as string | undefined) ?? "";
     if (!companyId) throw badRequest("companyId query param required");
     assertCompanyAccess(req, companyId);
+    // Only accept relative return URLs to prevent open redirects.
+    const rawReturnUrl = req.query.returnUrl as string | undefined;
+    const returnUrl = rawReturnUrl?.startsWith("/") ? rawReturnUrl : undefined;
     const stateToken = mintStateToken(env.clientSecret, {
       kind: "linear_app_install",
       companyId,
+      ...(returnUrl ? { returnUrl } : {}),
     });
     res.redirect(buildAppAuthorizeUrl(env, { companyId, stateToken }));
   });
@@ -258,6 +262,16 @@ export function messagingLinearRoutes(db: Db): Router {
         });
 
       invalidateMessagingContext(companyId);
+
+      const returnUrl =
+        typeof claims.returnUrl === "string" &&
+        claims.returnUrl.startsWith("/")
+          ? claims.returnUrl
+          : null;
+      if (returnUrl) {
+        res.redirect(returnUrl);
+        return;
+      }
 
       const prefix = companyRow.issuePrefix;
       res.redirect(

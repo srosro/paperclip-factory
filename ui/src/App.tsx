@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "@/lib/router";
 import { Button } from "@/components/ui/button";
 import { Layout } from "./components/Layout";
@@ -250,6 +251,26 @@ function NoCompaniesStartPage() {
   );
 }
 
+function OnboardingResumeHandler() {
+  const { openOnboarding } = useDialog();
+  const { selectedCompanyId } = useCompany();
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("onboarding") !== "resume") return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("onboarding");
+    window.history.replaceState({}, "", url.toString());
+    openOnboarding({
+      initialStep: 3,
+      ...(selectedCompanyId ? { companyId: selectedCompanyId } : {}),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return null;
+}
+
 export function App() {
   return (
     <>
@@ -308,6 +329,7 @@ export function App() {
         </Route>
       </Routes>
       <OnboardingWizard />
+      <OnboardingResumeHandler />
     </>
   );
 }

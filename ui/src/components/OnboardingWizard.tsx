@@ -9,6 +9,7 @@ import { goalsApi } from "../api/goals";
 import { agentsApi } from "../api/agents";
 import { issuesApi } from "../api/issues";
 import { projectsApi } from "../api/projects";
+import { messagingApi } from "../api/messaging";
 import { queryKeys } from "../lib/queryKeys";
 import { Dialog, DialogPortal } from "@/components/ui/dialog";
 import {
@@ -53,11 +54,12 @@ import {
   Check,
   Loader2,
   ChevronDown,
+  Link2,
   X
 } from "lucide-react";
 
 
-type Step = 1 | 2 | 3 | 4;
+type Step = 1 | 2 | 3 | 4 | 5;
 type AdapterType = string;
 
 const DEFAULT_TASK_DESCRIPTION = `You are the CEO. You set the direction for the company.
@@ -121,7 +123,7 @@ export function OnboardingWizard() {
   const [unsetAnthropicLoading, setUnsetAnthropicLoading] = useState(false);
   const [showMoreAdapters, setShowMoreAdapters] = useState(false);
 
-  // Step 3
+  // Step 4
   const [taskTitle, setTaskTitle] = useState(
     "Hire your first engineer and create a hiring plan"
   );
@@ -182,10 +184,27 @@ export function OnboardingWizard() {
     if (company) setCreatedCompanyPrefix(company.issuePrefix);
   }, [effectiveOnboardingOpen, createdCompanyId, createdCompanyPrefix, companies]);
 
-  // Resize textarea when step 3 is shown or description changes
+  // Resize textarea when step 4 is shown or description changes
   useEffect(() => {
-    if (step === 3) autoResizeTextarea();
+    if (step === 4) autoResizeTextarea();
   }, [step, taskDescription, autoResizeTextarea]);
+
+  // Poll messaging status on step 3; auto-advance when Linear is connected.
+  const messagingStatusQuery = useQuery({
+    queryKey: createdCompanyId
+      ? queryKeys.messaging.status(createdCompanyId)
+      : (["messaging", "status", "__disabled__"] as const),
+    queryFn: () => messagingApi.getStatus(createdCompanyId!),
+    enabled: !!createdCompanyId && step === 3,
+    refetchInterval: 2_000,
+  });
+
+  useEffect(() => {
+    if (step !== 3) return;
+    if (messagingStatusQuery.data?.readiness === "ready") {
+      setStep(4);
+    }
+  }, [step, messagingStatusQuery.data?.readiness]);
 
   const {
     data: adapterModels,
@@ -526,10 +545,10 @@ export function OnboardingWizard() {
     }
   }
 
-  async function handleStep3Next() {
+  async function handleStep4Next() {
     if (!createdCompanyId || !createdAgentId) return;
     setError(null);
-    setStep(4);
+    setStep(5);
   }
 
   async function handleLaunch() {
@@ -596,8 +615,8 @@ export function OnboardingWizard() {
       e.preventDefault();
       if (step === 1 && companyName.trim()) handleStep1Next();
       else if (step === 2 && agentName.trim()) handleStep2Next();
-      else if (step === 3 && taskTitle.trim()) handleStep3Next();
-      else if (step === 4) handleLaunch();
+      else if (step === 4 && taskTitle.trim()) handleStep4Next();
+      else if (step === 5) handleLaunch();
     }
   }
 
@@ -642,8 +661,9 @@ export function OnboardingWizard() {
                   [
                     { step: 1 as Step, label: "Company", icon: Building2 },
                     { step: 2 as Step, label: "Agent", icon: Bot },
-                    { step: 3 as Step, label: "Task", icon: ListTodo },
-                    { step: 4 as Step, label: "Launch", icon: Rocket }
+                    { step: 3 as Step, label: "Linear", icon: Link2 },
+                    { step: 4 as Step, label: "Task", icon: ListTodo },
+                    { step: 5 as Step, label: "Launch", icon: Rocket }
                   ] as const
                 ).map(({ step: s, label, icon: Icon }) => (
                   <button
@@ -1092,6 +1112,50 @@ export function OnboardingWizard() {
                 <div className="space-y-5">
                   <div className="flex items-center gap-3 mb-1">
                     <div className="bg-muted/50 p-2">
+                      <Link2 className="h-5 w-5 text-muted-foreground" />
+                    </div>
+                    <div>
+                      <h3 className="font-medium">Connect Linear</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Paperclip uses Linear as the ticketing backend. Connect
+                        your Linear workspace so issues can be created and
+                        tracked there.
+                      </p>
+                    </div>
+                  </div>
+                  {messagingStatusQuery.data?.readiness === "ready" ? (
+                    <p className="text-sm font-medium text-green-600">
+                      ✓ Linear workspace connected — advancing…
+                    </p>
+                  ) : (
+                    <Button
+                      size="sm"
+                      disabled={!createdCompanyId}
+                      onClick={() => {
+                        if (!createdCompanyId) return;
+                        const returnUrl = encodeURIComponent(
+                          window.location.pathname +
+                            window.location.search +
+                            (window.location.search ? "&" : "?") +
+                            "onboarding=resume"
+                        );
+                        window.location.assign(
+                          messagingApi.linearInstallUrl(createdCompanyId) +
+                            `&returnUrl=${returnUrl}`
+                        );
+                      }}
+                    >
+                      <Link2 className="mr-1.5 h-3.5 w-3.5" />
+                      Connect Linear workspace
+                    </Button>
+                  )}
+                </div>
+              )}
+
+              {step === 4 && (
+                <div className="space-y-5">
+                  <div className="flex items-center gap-3 mb-1">
+                    <div className="bg-muted/50 p-2">
                       <ListTodo className="h-5 w-5 text-muted-foreground" />
                     </div>
                     <div>
@@ -1129,7 +1193,7 @@ export function OnboardingWizard() {
                 </div>
               )}
 
-              {step === 4 && (
+              {step === 5 && (
                 <div className="space-y-5">
                   <div className="flex items-center gap-3 mb-1">
                     <div className="bg-muted/50 p-2">
@@ -1233,11 +1297,11 @@ export function OnboardingWizard() {
                       {loading ? "Creating..." : "Next"}
                     </Button>
                   )}
-                  {step === 3 && (
+                  {step === 4 && (
                     <Button
                       size="sm"
                       disabled={!taskTitle.trim() || loading}
-                      onClick={handleStep3Next}
+                      onClick={handleStep4Next}
                     >
                       {loading ? (
                         <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
@@ -1247,7 +1311,7 @@ export function OnboardingWizard() {
                       {loading ? "Creating..." : "Next"}
                     </Button>
                   )}
-                  {step === 4 && (
+                  {step === 5 && (
                     <Button size="sm" disabled={loading} onClick={handleLaunch}>
                       {loading ? (
                         <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
