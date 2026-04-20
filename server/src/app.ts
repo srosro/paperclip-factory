@@ -135,7 +135,6 @@ export async function createApp(
   // adapter as a runtime-testable backend.
   const publicBaseUrl =
     process.env.PAPERCLIP_PUBLIC_BASE_URL ||
-    process.env.SLACK_OAUTH_REDIRECT_BASE_URL ||
     `http://${opts.bindHost}:${process.env.PAPERCLIP_LISTEN_PORT ?? 3100}`;
   initMessaging({
     db,
