@@ -13,18 +13,6 @@ import type { BackendKey, MessagingAdapter } from "./types.js";
 import { MessagingNotConfigured } from "./types.js";
 import type { StorageService } from "../storage/types.js";
 import { createFakeAdapter } from "./adapters/fake/adapter.js";
-import { createSlackAdapter } from "./adapters/slack/adapter.js";
-import { resolveSlackMentions, rewriteOutboundBodyForSlack } from "./adapters/slack/mention-parser.js";
-import { createSlackFileIngest } from "./adapters/slack/file-ingest.js";
-
-export interface SlackTokenResolvers {
-  getBotToken: (companyId: string) => Promise<string>;
-  getUserToken: (companyId: string, secretId: string) => Promise<string>;
-  getAttachmentBytes?: (
-    companyId: string,
-    paperclipAttachmentId: string,
-  ) => Promise<Buffer>;
-}
 
 export interface OnMessageCreated {
   (args: {
@@ -44,7 +32,6 @@ export interface MessagingBootstrapDeps {
   storage?: StorageService;
   issueUrlBase?: string;
   onMessageCreated?: OnMessageCreated;
-  slack?: SlackTokenResolvers;
   /**
    * Test-only fallback. When set, companies without a messaging_company_config
    * row are treated as if activeBackend = testFallbackBackend. Production
@@ -99,27 +86,6 @@ export function getMessagingBootstrapDeps(): MessagingBootstrapDeps {
   return deps;
 }
 
-/**
- * Internal helper so inbound Slack webhook routes can look up the company
- * from an incoming team_id before resolving a context.
- */
-export async function findCompanyIdForSlackTeam(
-  team: string,
-): Promise<string | null> {
-  if (!deps) return null;
-  const [install] = await deps.db
-    .select({ companyId: messagingWorkspaceInstall.companyId })
-    .from(messagingWorkspaceInstall)
-    .where(
-      and(
-        eq(messagingWorkspaceInstall.backend, "slack"),
-        eq(messagingWorkspaceInstall.externalWorkspaceRef, team),
-      ),
-    )
-    .limit(1);
-  return install?.companyId ?? null;
-}
-
 export async function resolveMessagingContext(
   companyId: string,
 ): Promise<MessagingContext> {
@@ -136,33 +102,15 @@ export async function resolveMessagingContext(
     .limit(1);
 
   let backend: BackendKey | null = null;
-  if (cfg?.activeBackend === "slack" || cfg?.activeBackend === "fake") {
-    backend = cfg.activeBackend;
-  } else if (deps.testFallbackBackend) {
-    backend = deps.testFallbackBackend;
+  if (cfg?.activeBackend === "fake") {
+    backend = "fake";
+  } else if (deps.testFallbackBackend === "fake") {
+    backend = "fake";
   }
+  // Any other active_backend (including historical 'slack') resolves
+  // to 'disabled' on this branch. Linear is wired in Plan B.
 
   if (!backend) return { status: "disabled", companyId };
-
-  if (backend === "slack") {
-    const [install] = await deps.db
-      .select()
-      .from(messagingWorkspaceInstall)
-      .where(
-        and(
-          eq(messagingWorkspaceInstall.companyId, companyId),
-          eq(messagingWorkspaceInstall.backend, "slack"),
-          eq(messagingWorkspaceInstall.state, "active"),
-        ),
-      )
-      .limit(1);
-    if (!install || !deps.slack) {
-      return { status: "not_installed", companyId, backend };
-    }
-    const ctx = buildSlackContext(deps, companyId, install);
-    contextCache.set(companyId, ctx);
-    return ctx;
-  }
 
   // backend === 'fake'
   const ctx = buildFakeContext(deps, companyId);
@@ -225,50 +173,5 @@ function buildFakeContext(
     adapter,
     router,
     events,
-  };
-}
-
-function buildSlackContext(
-  bootstrap: MessagingBootstrapDeps,
-  companyId: string,
-  install: MessagingWorkspaceInstallRow,
-): ReadyMessagingContext {
-  if (!bootstrap.slack) {
-    throw new Error("slack resolvers not configured");
-  }
-  const adapter = createSlackAdapter({
-    getBotToken: bootstrap.slack.getBotToken,
-    getUserToken: bootstrap.slack.getUserToken,
-    companyId,
-    rewriteOutboundBody: (cid, body) =>
-      rewriteOutboundBodyForSlack(bootstrap.db, cid, body, bootstrap.issueUrlBase),
-    getAttachmentBytes: bootstrap.slack.getAttachmentBytes,
-  });
-  const router = createMessagingRouter({
-    db: bootstrap.db,
-    adapter,
-    backend: "slack",
-    workspaceInstallId: install.id,
-    issueUrlBase: bootstrap.issueUrlBase,
-  });
-  const ingestInboundFiles = bootstrap.storage
-    ? createSlackFileIngest({ db: bootstrap.db, storage: bootstrap.storage })
-    : undefined;
-  const events = createEventsProcessor({
-    db: bootstrap.db,
-    backend: "slack",
-    workspaceInstallId: install.id,
-    onMessageCreated: bootstrap.onMessageCreated,
-    resolveMentions: (body) => resolveSlackMentions(bootstrap.db, body),
-    ingestInboundFiles,
-  });
-  return {
-    status: "ready",
-    companyId,
-    backend: "slack",
-    adapter,
-    router,
-    events,
-    workspaceInstall: install,
   };
 }
