@@ -22,6 +22,7 @@ export interface MessagingAgentIdentityStatus {
 export type MessagingStatusReadiness =
   | "disabled"
   | "not_installed"
+  | "workflow_mapping_incomplete"
   | "agent_identities_incomplete"
   | "ready";
 
@@ -33,6 +34,7 @@ export interface MessagingStatusResponse {
   workspaceRef: string | null;
   workspaceInstallId: string | null;
   agentIdentities: MessagingAgentIdentityStatus[];
+  missingWorkflowStates?: string[];
 }
 
 const BACKEND = "linear" as const;
@@ -60,6 +62,7 @@ export function messagingAdminRoutes(db: Db): Router {
           workspaceName: messagingWorkspaceInstall.workspaceName,
           externalWorkspaceRef: messagingWorkspaceInstall.externalWorkspaceRef,
           state: messagingWorkspaceInstall.state,
+          metadata: messagingWorkspaceInstall.metadata,
         })
         .from(messagingWorkspaceInstall)
         .where(
@@ -105,11 +108,22 @@ export function messagingAdminRoutes(db: Db): Router {
         }))
         .sort((a, b) => a.agentName.localeCompare(b.agentName));
 
+      const workflowMap = install?.metadata
+        ? ((install.metadata as Record<string, unknown>)
+            .linearWorkflowStateMap as
+            | { kind: "complete" | "incomplete"; missing?: string[] }
+            | undefined)
+        : undefined;
+      const missingWorkflowStates =
+        workflowMap?.kind === "incomplete" ? workflowMap.missing ?? [] : [];
+
       let readiness: MessagingStatusReadiness;
       if (!activeBackend) {
         readiness = "disabled";
       } else if (!installed) {
         readiness = "not_installed";
+      } else if (missingWorkflowStates.length > 0) {
+        readiness = "workflow_mapping_incomplete";
       } else {
         const hasIncomplete = agentIdentities.some(
           (a) => a.state !== "active",
@@ -125,6 +139,9 @@ export function messagingAdminRoutes(db: Db): Router {
         workspaceRef: install?.externalWorkspaceRef ?? null,
         workspaceInstallId: install?.id ?? null,
         agentIdentities,
+        ...(missingWorkflowStates.length > 0
+          ? { missingWorkflowStates }
+          : {}),
       };
       res.json(response);
     },

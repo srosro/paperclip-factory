@@ -11,6 +11,7 @@ export interface MessagingAgentIdentity {
 export type MessagingReadiness =
   | "disabled"
   | "not_installed"
+  | "workflow_mapping_incomplete"
   | "agent_identities_incomplete"
   | "ready";
 
@@ -22,6 +23,7 @@ export interface MessagingStatus {
   workspaceRef: string | null;
   workspaceInstallId: string | null;
   agentIdentities: MessagingAgentIdentity[];
+  missingWorkflowStates?: string[];
 }
 
 export const messagingApi = {
@@ -29,4 +31,8 @@ export const messagingApi = {
     api.get<MessagingStatus>(
       `/companies/${encodeURIComponent(companyId)}/messaging/status`,
     ),
+  linearInstallUrl: (companyId: string) =>
+    `/api/messaging/linear/oauth/app/start?companyId=${encodeURIComponent(companyId)}`,
+  linearLinkAgentUrl: (agentId: string) =>
+    `/api/messaging/linear/oauth/user/start?agentId=${encodeURIComponent(agentId)}`,
 };
