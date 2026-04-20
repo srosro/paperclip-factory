@@ -95,7 +95,7 @@ Slack-era tables `messaging_channels` and `messaging_threads` are dropped. `mess
 
 **Added columns:**
 - `issues.linear_issue_id uuid` — Linear's internal issue UUID. Unique partial index where not null.
-- `issues.linear_issue_identifier text` — Linear-generated human identifier (e.g. `SAM-10`). Denormalized from Linear's `identifier` field for fast display. Optional (can compute from team key + counter but caching avoids extra API calls).
+- `issues.linear_issue_identifier text` — Linear-generated human identifier (e.g. `SAI-1`). Denormalized from Linear's `identifier` field for fast display. Optional (can compute from team key + counter but caching avoids extra API calls).
 - `projects.linear_project_id uuid` — Linear Project UUID. Unique partial index where not null.
 
 **New table:**
@@ -406,13 +406,13 @@ POST /api/companies/:id/issues
           priority: <0-4 from priority map>,
           labelIds: <resolved via messaging_label_refs>
         })
-          → Linear GraphQL issueCreate → returns { id: linearUUID, identifier: 'SAM-10', ... }
+          → Linear GraphQL issueCreate → returns { id: linearUUID, identifier: 'SAI-1', ... }
       → stamp self-origination marker
       → insert issues row with
           id = uuid (Paperclip internal),
           linear_issue_id = linearUUID,
-          linear_issue_identifier = 'SAM-10',
-          identifier = 'SAM-10',  -- copy for display
+          linear_issue_identifier = 'SAI-1',
+          identifier = 'SAI-1',  -- copy for display
           title, description, assignee, status, priority = copy from returned Linear issue
   → return { id, identifier } to caller
 ```
@@ -469,7 +469,7 @@ On wakeup (after merging `feat/linear-backend`):
 7. Per-agent Linear OAuth for each
 8. Status flips `disabled → not_installed → agent_identities_incomplete → ready` as each step completes
 9. Creates a new project in Paperclip UI (plow-dev) → auto-provisions a Linear Project with the same name
-10. First issue `SAM-1` in Linear kicks off fresh
+10. First issue `SAI-1` in Linear kicks off fresh
 
 Sam's Plow Peeps existing Slack-era issues (SAM-1..9) stay in the `issues` table (nothing deleted) but have `linear_issue_id IS NULL`. On the first Linear-era launch, a cleanup job marks them `cancelled` with a comment explaining they're archived Slack-era work. They're still readable in Paperclip's UI for reference.
 
@@ -513,13 +513,24 @@ Ported from `messaging-hardening.test.ts` + new:
 5. **Per-agent seat cost.** Each agent = one Linear seat. For Plow (5 agents) this is manageable; for larger deployments it could add up. No mitigation in MVP; reconsider if adoption scales.
 6. **Linear webhook retries.** Linear retries failed deliveries. Dedup via `messaging_events_inbox` handles it, but we should verify our 10s ack budget is achievable even on slow DB hops.
 
-### Open questions
+### Resolved questions (2026-04-19)
 
-1. **Linear workspace tier + existing workspace.** Which tier (Free / Basic / Business)? Using an existing workspace for Plow or creating a new one? Affects team-key availability.
-2. **Invite automation vs. manual.** For MVP: manual. Later: programmatic `organizationInviteCreate` during the per-agent OAuth click? If automated, who pays for the seat (auto-upgrade)? Defer.
-3. **`#proj-plow-dev` channel in Slack post-migration.** Keep it open (members can re-use for chat), or archive it? Cosmetic; admin's choice.
-4. **Retention of `feedback_votes` post-migration.** They reference `messaging_message_refs.id` via FK. The rename to `issue_comment_refs` requires the FK to repoint. Migration must handle this.
-5. **Legacy Slack-era issues (SAM-1..9) treatment.** Cancel on first Linear launch, or leave in-place and let admin cancel manually? Proposed: cancel with a migration comment on each explaining why.
+1. **Linear workspace:** New workspace to be created for Paperclip Factory (no existing workspace reused). Created before OAuth-app setup.
+2. **Linear plan tier:** Basic ($10/user/mo). Enough for MVP and all webhook/OAuth features we need.
+3. **Team key / prefix:** `SAI`. Sam's Plow Peeps' `companies.issue_prefix` migrates `SAM → SAI` as part of the Linear-backend migration, so Paperclip URLs (`/SAI/...`) align with Linear identifiers (`SAI-1`, `SAI-2`, ...).
+4. **Agent email convention:** reuse Slack-era `sam+<role>@plow.co` pattern (`sam+ceo@plow.co`, `sam+cto@plow.co`, `sam+engmgr@plow.co`, `sam+techlead@plow.co`, `sam+developer@plow.co`).
+5. **Invite flow:** manual invites for MVP. Admin invites each agent email to the Linear workspace, then runs per-agent OAuth. Programmatic `organizationInviteCreate` deferred.
+6. **CTO account:** yes, invite a real `sam+cto@plow.co` seat now. CTO gets its own Linear user; no bot_system fallback.
+7. **Board user identity:** `so@plow.co` — Sam's real Linear account. `messaging_identities` row for `local-board` ↔ `so@plow.co`'s Linear user UUID, resolved via auto-discovery (email match) during app install.
+8. **FakeAdapter retention:** keep, retargeted to `IssueTrackerAdapter`. Tests depend on it.
+9. **SAM-1..9 treatment on first Linear launch:** cancel each, add an auto-comment: _"Archived: Slack-era Paperclip Factory work; migrated to Linear on 2026-04-19."_ Issues remain readable in Paperclip for reference.
+10. **`feedback_votes` FK retarget:** yes — migration must repoint the FK from `messaging_message_refs.id` → `issue_comment_refs.id`. Data-preserving.
+11. **Slack helper scripts (`slack-smoke.ts`, `plow-dev-bootstrap.ts`, `plow-dev-finish.ts`):** delete on `feat/linear-backend`. They're Slack-era one-offs.
+12. **Ngrok:** reuse `paperclip-factory.ngrok.app` → wakeup:3100. Linear webhooks arrive at a different path (`/api/messaging/linear/events`).
+13. **Slack retirement:** delete the Paperclip Factory Slack app at api.slack.com, archive `#proj-plow-dev` in Slack, remove `sam-ceo` / `sam-engmgr` / `so+techlead` / `sam-eng` from the Plow Slack workspace, remove `SLACK_*` env vars from `~/.paperclip/instances/default/.env`.
+14. **Linear Project visibility:** team-wide (default).
+15. **Label color:** use Paperclip's `labels.color` when set; deterministic hash of label name otherwise.
+16. **Paperclip Factory Linear OAuth app registration:** admin registers at `linear.app/settings/api/applications` before the OAuth flow is exercised. Credentials land in env as `LINEAR_APP_CLIENT_ID`, `LINEAR_APP_CLIENT_SECRET`, `LINEAR_WEBHOOK_SECRET`.
 
 ## Merge gate
 
