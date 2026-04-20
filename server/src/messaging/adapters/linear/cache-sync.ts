@@ -7,10 +7,10 @@ import type { Db } from "../../router.js";
 import type { MessagingEvent } from "../../types.js";
 import { findLinearLabelByExternalRef } from "./label-sync.js";
 import {
+  type WorkflowStateMap,
   invertWorkflowStateMap,
   mapLinearPriorityToPaperclip,
 } from "./workflow-state-map.js";
-import type { WorkflowStateMap } from "./workflow-state-map.js";
 
 export interface CacheSyncDeps {
   db: Db;
@@ -77,22 +77,20 @@ async function updateIssueFromEvent(
     .limit(1);
   if (!existing) return;
 
-  const patch: Record<string, unknown> = { updatedAt: new Date() };
-
-  if ("title" in event && event.title != null) {
-    patch.title = event.title;
-  }
-  if ("description" in event && event.description !== undefined) {
-    patch.description = event.description;
-  }
-  if ("priority" in event && event.priority != null) {
-    const mapped = mapLinearPriorityToPaperclip(event.priority as number);
-    if (mapped !== null) patch.priority = mapped;
-  }
-  if ("stateExternalRef" in event && event.stateExternalRef != null && deps.workflowStateMap) {
-    const inverted = invertWorkflowStateMap(deps.workflowStateMap);
-    const status = inverted[event.stateExternalRef as string];
-    if (status !== undefined) patch.status = status;
+  const patch: Partial<typeof issuesTable.$inferInsert> & { updatedAt: Date } = {
+    updatedAt: new Date(),
+  };
+  if (event.kind === "issue_updated") {
+    if (event.title != null) patch.title = event.title;
+    if (event.description !== undefined) patch.description = event.description;
+    if (event.priority != null) {
+      const mapped = mapLinearPriorityToPaperclip(event.priority);
+      if (mapped !== null) patch.priority = mapped;
+    }
+    if (event.stateExternalRef != null && deps.workflowStateMap) {
+      const status = invertWorkflowStateMap(deps.workflowStateMap)[event.stateExternalRef];
+      if (status !== undefined) patch.status = status;
+    }
   }
 
   await deps.db
