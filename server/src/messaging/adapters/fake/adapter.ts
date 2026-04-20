@@ -226,6 +226,7 @@ export function createFakeAdapter(): IssueTrackerAdapter & {
       _companyId: string,
       name: string,
       color?: string | null,
+      _externalTeamRef?: ExternalRef,
     ): Promise<ExternalRef> {
       const existing = [...labelsByRef.entries()].find(([, l]) => l.name === name);
       if (existing) return existing[0];

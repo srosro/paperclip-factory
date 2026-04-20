@@ -107,9 +107,16 @@ export interface UploadAttachmentArgs {
   externalIssueRef: ExternalRef;
   externalCommentRef?: ExternalRef;
   by: AuthorIdentity;
-  filename: string;
-  contentType: string;
-  body: Buffer;
+  title: string;
+  /**
+   * URL where the attachment bytes are hosted. Linear's attachmentCreate
+   * is metadata-only — it stores a pointer to externally-hosted content.
+   * Callers upload to their own blob store first and pass the resulting
+   * URL here.
+   */
+  url: string;
+  contentType?: string;
+  sizeBytes?: number;
 }
 
 export interface AttachmentUploadResult {
@@ -238,6 +245,7 @@ export interface IssueTrackerAdapter {
     companyId: string,
     name: string,
     color?: string | null,
+    externalTeamRef?: ExternalRef,
   ): Promise<ExternalRef>;
   setIssueLabels(
     externalIssueRef: ExternalRef,
