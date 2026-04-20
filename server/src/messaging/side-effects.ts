@@ -4,7 +4,6 @@ import {
   messagingMessageRefs,
 } from "@paperclipai/db";
 import type { Db } from "./router.js";
-import { dispatchInboxForMention } from "./inbox.js";
 import { heartbeatService } from "../services/heartbeat.js";
 
 export interface MessageCreatedSideEffects {
@@ -15,7 +14,6 @@ export interface MessageCreatedSideEffects {
   authorUserId: string | null;
   authorExternalRef: string;
   mentionedAgentIds: string[];
-  mentionedUserIds: string[];
 }
 
 export interface SideEffectDeps {
@@ -24,14 +22,13 @@ export interface SideEffectDeps {
 
 /**
  * Run the one and only side-effect pipeline for a new message, regardless of
- * origin (inbound Slack webhook, outbound Paperclip post, or fake-adapter
- * echo). Responsibilities:
+ * origin (inbound webhook, outbound Paperclip post, or fake-adapter echo).
+ * Responsibilities:
  *
  *  - respect the ref's suppressedForWake flag
  *  - wake the assignee agent (issue_commented) unless the comment is a
  *    self-comment from the assignee
  *  - wake each @mentioned agent (issue_comment_mentioned) except the author
- *  - dispatch inbox DMs to mentioned users
  *
  * Idempotency: callers must ensure this is invoked at most once per ref id.
  * Today that's enforced by (a) events.ts inserting with onConflictDoNothing
@@ -128,18 +125,6 @@ export async function handleMessageCreatedSideEffects(
     void heartbeat.wakeup(agentId, wakeup).catch(() => {
       // Wakeup failures are logged inside the service; swallow here so one
       // agent's failure does not block others.
-    });
-  }
-
-  // Inbox DMs to mentioned users. dispatchInboxForMention self-gates on
-  // identity resolution so companies without linked humans are no-ops.
-  for (const userId of args.mentionedUserIds) {
-    void dispatchInboxForMention(deps.db, {
-      companyId: args.companyId,
-      mentionedUserId: userId,
-      issueId: args.issueId,
-      fromDisplayName: args.authorExternalRef,
-      commentRefId: args.refId,
     });
   }
 

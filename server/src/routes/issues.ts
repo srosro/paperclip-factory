@@ -2495,7 +2495,6 @@ export function issueRoutes(
           authorUserId: actor.actorType === "user" ? actor.actorId : null,
           authorExternalRef: actor.actorId,
           mentionedAgentIds,
-          mentionedUserIds: [],
         },
       );
     })();

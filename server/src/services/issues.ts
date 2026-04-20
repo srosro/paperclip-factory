@@ -27,10 +27,6 @@ import {
   resolveMessagingContext,
   requireMessagingContext,
 } from "../messaging/index.js";
-import {
-  dispatchInboxForAssignment,
-  dispatchInboxForStatusChange,
-} from "../messaging/inbox.js";
 import type { IssueRelationIssueSummary } from "@paperclipai/shared";
 import { extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -1621,14 +1617,6 @@ export function issueService(db: Db) {
           );
         }
         const [enriched] = await withIssueLabels(tx, [issue]);
-        if (enriched?.assigneeUserId) {
-          void dispatchInboxForAssignment(db, {
-            companyId: enriched.companyId,
-            assigneeUserId: enriched.assigneeUserId,
-            issueId: enriched.id,
-            priority: enriched.priority,
-          });
-        }
         return enriched;
       });
     },
@@ -1798,32 +1786,6 @@ export function issueService(db: Db) {
             const terminal = result.status === "done" || result.status === "cancelled";
             void ctx.router.setThreadLocked(result.id, terminal);
           }
-        }
-
-        // Fire inbox DMs for assignment / status change on the assignee user.
-        // dispatchInbox* helpers self-gate on identity resolution.
-        const assigneeChanged =
-          issueData.assigneeUserId !== undefined &&
-          issueData.assigneeUserId !== existing.assigneeUserId;
-        if (assigneeChanged && result.assigneeUserId) {
-          void dispatchInboxForAssignment(db, {
-            companyId: result.companyId,
-            assigneeUserId: result.assigneeUserId,
-            issueId: result.id,
-            priority: result.priority,
-          });
-        }
-        if (
-          issueData.status !== undefined &&
-          issueData.status !== existing.status &&
-          result.assigneeUserId
-        ) {
-          void dispatchInboxForStatusChange(db, {
-            companyId: result.companyId,
-            ownerUserId: result.assigneeUserId,
-            issueId: result.id,
-            newStatus: result.status,
-          });
         }
       }
 

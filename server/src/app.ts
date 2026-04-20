@@ -27,8 +27,6 @@ import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
 import { sidebarPreferenceRoutes } from "./routes/sidebar-preferences.js";
 import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
-import { messagingSlackRoutes } from "./routes/messaging-slack.js";
-import { messagingInboxRoutes } from "./routes/messaging-inbox.js";
 import { messagingAdminRoutes } from "./routes/messaging-admin.js";
 import { llmRoutes } from "./routes/llms.js";
 import { authRoutes } from "./routes/auth.js";
@@ -55,7 +53,7 @@ import { pluginRegistryService } from "./services/plugin-registry.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
-import { defaultSlackResolvers, initMessaging } from "./messaging/index.js";
+import { initMessaging } from "./messaging/index.js";
 import { handleMessageCreatedSideEffects } from "./messaging/side-effects.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -132,34 +130,20 @@ export async function createApp(
 ) {
   // Bootstrap messaging: register shared deps. Backend selection is per
   // company, resolved from messaging_company_config + messaging_workspace_install
-  // on each request (see server/src/messaging/context.ts). Presence of Slack
-  // env vars is a prerequisite for Slack to work at all; it does not force any
-  // company onto Slack by itself.
-  const slackEnvConfigured = Boolean(
-    process.env.SLACK_APP_CLIENT_ID &&
-      process.env.SLACK_APP_CLIENT_SECRET &&
-      process.env.SLACK_SIGNING_SECRET,
-  );
-  // Public base URL for in-body link rewrites. Agents emit Slack-style
-  // `</path|label>` with absolute Paperclip paths; the outbound rewriter
-  // prefixes this host so Slack renders them as real links. Prefer the Slack
-  // OAuth redirect base (set when Paperclip is fronted by a tunnel/domain),
-  // fall back to the local bind so single-host deployments still work.
+  // on each request (see server/src/messaging/context.ts). The Linear backend
+  // wiring lands in Plan B; Plan A retires Slack and leaves only the fake
+  // adapter as a runtime-testable backend.
   const publicBaseUrl =
-    process.env.SLACK_OAUTH_REDIRECT_BASE_URL ||
     process.env.PAPERCLIP_PUBLIC_BASE_URL ||
+    process.env.SLACK_OAUTH_REDIRECT_BASE_URL ||
     `http://${opts.bindHost}:${process.env.PAPERCLIP_LISTEN_PORT ?? 3100}`;
   initMessaging({
     db,
     storage: opts.storageService,
-    slack: slackEnvConfigured
-      ? defaultSlackResolvers(db, opts.storageService)
-      : undefined,
     issueUrlBase: publicBaseUrl,
     // onMessageCreated is the single hook that inbound events fire after a
     // ref row is persisted. It feeds the unified side-effect pipeline so
-    // inbound Slack comments wake assignees + mentioned agents and DM
-    // mentioned users — same behavior outbound posts get.
+    // inbound external-tracker comments wake assignees + mentioned agents.
     onMessageCreated: (args) => handleMessageCreatedSideEffects({ db }, args),
   });
 
@@ -232,8 +216,6 @@ export async function createApp(
   api.use(sidebarPreferenceRoutes(db));
   api.use(inboxDismissalRoutes(db));
   api.use(instanceSettingsRoutes(db));
-  api.use("/messaging/slack", messagingSlackRoutes(db));
-  api.use("/messaging", messagingInboxRoutes(db));
   api.use(messagingAdminRoutes(db));
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = createPluginWorkerManager();
