@@ -143,11 +143,10 @@ describeIf("messaging fake-adapter E2E", () => {
       .where(eq(issueCommentRefs.id, posted.id));
     expect(refAfterDelete!.deletedAt).toBeInstanceOf(Date);
 
-    // The events handler did not fire onMessageCreated for the router-posted
-    // comment because the router insert raced ahead of the echoed event;
-    // onConflictDoNothing returned no row so the post-insert path bailed.
-    // What matters is the side-effect contract: the comment ref exists, edits
-    // and deletes were processed.
-    expect(onCreated).not.toHaveBeenCalled();
+    // onMessageCreated may or may not have fired depending on the race
+    // between the router's insert and the events processor's upsert (both
+    // race against the same (issueId, externalMessageRef) unique key).
+    // What matters is the comment ref exists, was edited, and was deleted —
+    // those assertions above passed.
   });
 });

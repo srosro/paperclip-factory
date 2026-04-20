@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   Comment,
   CommentRef,
@@ -62,7 +63,7 @@ export function createFakeAdapter(): IssueTrackerAdapter & {
 
     async createIssue(args: CreateIssueArgs): Promise<IssueRef> {
       counter += 1;
-      const ref = `I_${counter}`;
+      const ref = randomUUID();
       const identifier = `FAKE-${counter}`;
       const now = new Date();
       const issue: LocalIssue = {
@@ -158,7 +159,7 @@ export function createFakeAdapter(): IssueTrackerAdapter & {
 
     async postComment(args: PostCommentArgs): Promise<CommentRef> {
       counter += 1;
-      const ref = `C_${counter}`;
+      const ref = randomUUID();
       const now = new Date();
       commentsByRef.set(ref, {
         externalCommentRef: ref,

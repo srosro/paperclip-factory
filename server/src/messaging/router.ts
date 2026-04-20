@@ -180,12 +180,48 @@ export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
       .where(eq(issuesTable.id, issueId))
       .limit(1);
     if (!row) throw new Error(`issue ${issueId} not found in cache`);
-    if (!row.linearIssueId) {
-      throw new Error(
-        `issue ${issueId} has no linear_issue_id — cannot route to external tracker until it's created there`,
-      );
-    }
     return row;
+  }
+
+  /**
+   * Lazily ensure the issue exists in the external tracker. If the cached row
+   * has no linearIssueId yet, mint one via adapter.createIssue and persist it
+   * back to the issues row. Plan B will replace this with a proper cache-sync
+   * pipeline that mirrors Paperclip → Linear writes through a single path.
+   */
+  async function ensureExternalIssue(issueId: string): Promise<{
+    externalIssueRef: string;
+    issueRow: typeof issuesTable.$inferSelect;
+  }> {
+    const row = await requireCachedIssue(issueId);
+    if (row.linearIssueId) {
+      return { externalIssueRef: row.linearIssueId, issueRow: row };
+    }
+    const created = await adapter.createIssue({
+      externalTeamRef: "",
+      title: row.title,
+      description: row.description ?? null,
+      assigneeExternalRef: null,
+      stateExternalRef: null,
+      priority: null,
+      labelExternalRefs: [],
+      author: {
+        backend: deps.backend,
+        externalUserRef: "SYSTEM",
+        credential: deps.backend === "fake" ? { kind: "none" } : { kind: "bot_token" },
+      },
+    });
+    await deps.db
+      .update(issuesTable)
+      .set({
+        linearIssueId: created.externalIssueRef,
+        linearIssueIdentifier: created.identifier,
+      })
+      .where(eq(issuesTable.id, issueId));
+    return {
+      externalIssueRef: created.externalIssueRef,
+      issueRow: { ...row, linearIssueId: created.externalIssueRef, linearIssueIdentifier: created.identifier },
+    };
   }
 
   const router: IssueTrackerRouter = {
@@ -212,7 +248,7 @@ export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
     },
 
     async updateIssue(args) {
-      const cached = await requireCachedIssue(args.issueId);
+      const ensured = await ensureExternalIssue(args.issueId);
       const author = await resolveAuthorIdentity({
         companyId: args.companyId,
         agentId: args.authorAgentId,
@@ -220,7 +256,7 @@ export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
         kindHint: args.authorKind,
       });
       await adapter.updateIssue({
-        externalIssueRef: cached.linearIssueId!,
+        externalIssueRef: ensured.externalIssueRef,
         title: args.title ?? undefined,
         description: args.description ?? undefined,
         assigneeExternalRef: args.assigneeAgentId ? undefined : null,
@@ -231,7 +267,7 @@ export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
     },
 
     async postComment(args) {
-      const cached = await requireCachedIssue(args.issueId);
+      const ensured = await ensureExternalIssue(args.issueId);
       const author = await resolveAuthorIdentity({
         companyId: args.companyId,
         agentId: args.authorAgentId,
@@ -239,7 +275,7 @@ export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
         kindHint: args.authorKind,
       });
       const posted = await adapter.postComment({
-        externalIssueRef: cached.linearIssueId!,
+        externalIssueRef: ensured.externalIssueRef,
         author,
         body: args.body,
         attachments: args.attachments,
