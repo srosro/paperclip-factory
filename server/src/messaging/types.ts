@@ -255,13 +255,6 @@ export interface IssueTrackerAdapter {
   normalizeEvent(raw: unknown): MessagingEvent | null;
 }
 
-/**
- * Deprecated alias — will be removed once all call sites are migrated
- * away. Prefer `IssueTrackerAdapter`. Stays only as a transitional export
- * for one commit; removed in Task 10.
- */
-export type MessagingAdapter = IssueTrackerAdapter;
-
 export class MessagingBackendUnavailable extends Error {
   constructor(
     message: string,

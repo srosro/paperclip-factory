@@ -7,14 +7,11 @@ import {
   projects,
   issues,
   agents,
-  messagingChannels,
-  messagingThreads,
+  issueCommentRefs,
   messagingIdentities,
-  messagingMessageRefs,
   messagingEventsInbox,
 } from "@paperclipai/db";
 import { createFakeAdapter } from "../messaging/adapters/fake/adapter.js";
-import { createMessagingRouter } from "../messaging/router.js";
 import { createEventsProcessor } from "../messaging/events.js";
 import type { MessagingEvent } from "../messaging/types.js";
 import {
@@ -35,6 +32,7 @@ async function seedFull(db: ReturnType<typeof createDb>) {
     .insert(projects)
     .values({ companyId: company!.id, name: `Plow ${suffix}` })
     .returning();
+  const linearIssueId = randomUUID();
   const [issue] = await db
     .insert(issues)
     .values({
@@ -42,6 +40,8 @@ async function seedFull(db: ReturnType<typeof createDb>) {
       projectId: project!.id,
       title: "events",
       identifier: `CE${suffix}-1`,
+      linearIssueId,
+      linearIssueIdentifier: `CE${suffix}-1`,
     })
     .returning();
   const [agent] = await db
@@ -57,8 +57,8 @@ async function seedFull(db: ReturnType<typeof createDb>) {
   });
   return {
     companyId: company!.id,
-    projectId: project!.id,
     issueId: issue!.id,
+    linearIssueId,
     agentId: agent!.id,
   };
 }
@@ -74,10 +74,8 @@ describeIf("messaging events processor", () => {
 
   afterEach(async () => {
     await db.delete(messagingEventsInbox);
-    await db.delete(messagingMessageRefs);
-    await db.delete(messagingThreads);
+    await db.delete(issueCommentRefs);
     await db.delete(messagingIdentities);
-    await db.delete(messagingChannels);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(projects);
@@ -88,32 +86,19 @@ describeIf("messaging events processor", () => {
     await tempDb?.cleanup();
   });
 
-  it("dedups duplicate externalEventId", async () => {
+  it("dedups duplicate externalEventId and fires onMessageCreated once", async () => {
     const s = await seedFull(db);
-    const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
     const onCreated = vi.fn().mockResolvedValue(undefined);
     const events = createEventsProcessor({ db, backend: "fake", onMessageCreated: onCreated });
 
-    // Establish a thread so events have a target
-    const thread = await router.getOrCreateThread({
-      companyId: s.companyId,
-      issueId: s.issueId,
-      projectId: s.projectId,
-    });
-    const [channel] = await db
-      .select()
-      .from(messagingChannels)
-      .where(eq(messagingChannels.id, thread.channelId));
-
     const event: MessagingEvent = {
-      kind: "message",
+      kind: "comment_created",
       externalEventId: "EV1",
-      channelRef: channel!.externalChannelRef,
-      threadRef: thread.threadRef,
-      messageRef: "M_ext_1",
+      externalIssueRef: s.linearIssueId,
+      externalCommentRef: "C_ext_1",
       authorExternalRef: "U_alice",
       bodyRaw: "hi",
+      mentionedExternalRefs: [],
       createdAt: new Date(),
     };
 
@@ -122,146 +107,116 @@ describeIf("messaging events processor", () => {
 
     const refs = await db
       .select()
-      .from(messagingMessageRefs)
-      .where(eq(messagingMessageRefs.externalMessageRef, "M_ext_1"));
+      .from(issueCommentRefs)
+      .where(eq(issueCommentRefs.externalMessageRef, "C_ext_1"));
     expect(refs).toHaveLength(1);
     expect(onCreated).toHaveBeenCalledTimes(1);
   });
 
   it("handleEdit bumps editedAt and editCount", async () => {
     const s = await seedFull(db);
-    const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
-
-    // Wire events to the adapter's local echo so postMessage causes a real event
     const events = createEventsProcessor({ db, backend: "fake" });
-    adapter.onLocalEvent((e) => void events.handle(e));
 
-    await router.postMessage({
-      companyId: s.companyId,
-      issueId: s.issueId,
-      projectId: s.projectId,
-      authorAgentId: s.agentId,
-      body: "v1",
+    await events.handle({
+      kind: "comment_created",
+      externalEventId: "EV_c1",
+      externalIssueRef: s.linearIssueId,
+      externalCommentRef: "C_ext_2",
+      authorExternalRef: "U_alice",
+      bodyRaw: "v1",
+      mentionedExternalRefs: [],
+      createdAt: new Date(),
     });
-    // Allow microtask queue to drain the onLocalEvent handler
-    await new Promise((r) => setTimeout(r, 10));
-
-    const [refBefore] = await db.select().from(messagingMessageRefs);
-    expect(refBefore!.editCount).toBe(0);
-    const [channelRow] = await db
-      .select()
-      .from(messagingChannels)
-      .innerJoin(messagingThreads, eq(messagingThreads.channelId, messagingChannels.id))
-      .where(eq(messagingThreads.id, refBefore!.threadId));
 
     const editEvent: MessagingEvent = {
-      kind: "message_changed",
+      kind: "comment_updated",
       externalEventId: "EV_edit",
-      messageRef: refBefore!.externalMessageRef,
-      channelRef: channelRow!.messaging_channels.externalChannelRef,
+      externalCommentRef: "C_ext_2",
+      externalIssueRef: s.linearIssueId,
       bodyRaw: "v2",
       editedAt: new Date(),
     };
     await events.handle(editEvent);
 
-    const [refAfter] = await db.select().from(messagingMessageRefs);
+    const [refAfter] = await db
+      .select()
+      .from(issueCommentRefs)
+      .where(eq(issueCommentRefs.externalMessageRef, "C_ext_2"));
     expect(refAfter!.editCount).toBe(1);
     expect(refAfter!.editedAt).toBeInstanceOf(Date);
   });
 
   it("handleDelete sets deletedAt", async () => {
     const s = await seedFull(db);
-    const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
     const events = createEventsProcessor({ db, backend: "fake" });
-    adapter.onLocalEvent((e) => void events.handle(e));
-
-    await router.postMessage({
-      companyId: s.companyId,
-      issueId: s.issueId,
-      projectId: s.projectId,
-      authorAgentId: s.agentId,
-      body: "gone",
-    });
-    await new Promise((r) => setTimeout(r, 10));
-
-    const [ref] = await db.select().from(messagingMessageRefs);
-    const [delChannel] = await db
-      .select()
-      .from(messagingChannels)
-      .innerJoin(messagingThreads, eq(messagingThreads.channelId, messagingChannels.id))
-      .where(eq(messagingThreads.id, ref!.threadId));
 
     await events.handle({
-      kind: "message_deleted",
+      kind: "comment_created",
+      externalEventId: "EV_c1",
+      externalIssueRef: s.linearIssueId,
+      externalCommentRef: "C_ext_3",
+      authorExternalRef: "U_alice",
+      bodyRaw: "gone",
+      mentionedExternalRefs: [],
+      createdAt: new Date(),
+    });
+
+    await events.handle({
+      kind: "comment_deleted",
       externalEventId: "EV_del",
-      messageRef: ref!.externalMessageRef,
-      channelRef: delChannel!.messaging_channels.externalChannelRef,
+      externalCommentRef: "C_ext_3",
+      externalIssueRef: s.linearIssueId,
       deletedAt: new Date(),
     });
 
-    const [refAfter] = await db.select().from(messagingMessageRefs);
+    const [refAfter] = await db
+      .select()
+      .from(issueCommentRefs)
+      .where(eq(issueCommentRefs.externalMessageRef, "C_ext_3"));
     expect(refAfter!.deletedAt).toBeInstanceOf(Date);
   });
 
   it("reactions are tracked per emoji per reactor", async () => {
     const s = await seedFull(db);
-    const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
     const events = createEventsProcessor({ db, backend: "fake" });
-    adapter.onLocalEvent((e) => void events.handle(e));
 
-    await router.postMessage({
-      companyId: s.companyId,
-      issueId: s.issueId,
-      projectId: s.projectId,
-      authorAgentId: s.agentId,
-      body: "react",
+    await events.handle({
+      kind: "comment_created",
+      externalEventId: "EV_c1",
+      externalIssueRef: s.linearIssueId,
+      externalCommentRef: "C_ext_4",
+      authorExternalRef: "U_alice",
+      bodyRaw: "react",
+      mentionedExternalRefs: [],
+      createdAt: new Date(),
     });
-    await new Promise((r) => setTimeout(r, 10));
-    const [ref] = await db.select().from(messagingMessageRefs);
-    const [reactionChannel] = await db
-      .select()
-      .from(messagingChannels)
-      .innerJoin(messagingThreads, eq(messagingThreads.channelId, messagingChannels.id))
-      .where(eq(messagingThreads.id, ref!.threadId));
 
     const base = {
-      externalEventId: "",
-      messageRef: ref!.externalMessageRef,
-      channelRef: reactionChannel!.messaging_channels.externalChannelRef,
+      externalIssueRef: s.linearIssueId,
+      externalCommentRef: "C_ext_4",
       emoji: "+1",
       at: new Date(),
-    };
+    } as const;
     await events.handle({ ...base, kind: "reaction_added", externalEventId: "R1", reactorExternalRef: "U_a" });
     await events.handle({ ...base, kind: "reaction_added", externalEventId: "R2", reactorExternalRef: "U_b" });
     await events.handle({ ...base, kind: "reaction_removed", externalEventId: "R3", reactorExternalRef: "U_a" });
 
-    const [refAfter] = await db.select().from(messagingMessageRefs);
+    const [refAfter] = await db
+      .select()
+      .from(issueCommentRefs)
+      .where(eq(issueCommentRefs.externalMessageRef, "C_ext_4"));
     expect(refAfter!.reactions).toEqual({ "+1": ["U_b"] });
   });
 
   it("respects suppressedForWake by not calling onMessageCreated", async () => {
     const s = await seedFull(db);
-    const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
-    const thread = await router.getOrCreateThread({
-      companyId: s.companyId,
-      issueId: s.issueId,
-      projectId: s.projectId,
-    });
-    const [channel] = await db
-      .select()
-      .from(messagingChannels)
-      .where(eq(messagingChannels.id, thread.channelId));
 
     // Pre-seed a ref with suppressedForWake=true and the same externalMessageRef
-    // that the inbound event will carry.
-    await db.insert(messagingMessageRefs).values({
-      threadId: thread.id,
+    // the inbound event carries.
+    await db.insert(issueCommentRefs).values({
+      issueId: s.issueId,
       backend: "fake",
-      externalMessageRef: "M_pre",
+      externalMessageRef: "C_pre",
       authorAgentId: s.agentId,
       suppressedForWake: true,
     });
@@ -270,13 +225,13 @@ describeIf("messaging events processor", () => {
     const events = createEventsProcessor({ db, backend: "fake", onMessageCreated: onCreated });
 
     await events.handle({
-      kind: "message",
+      kind: "comment_created",
       externalEventId: "EV_sup",
-      channelRef: channel!.externalChannelRef,
-      threadRef: thread.threadRef,
-      messageRef: "M_pre",
+      externalIssueRef: s.linearIssueId,
+      externalCommentRef: "C_pre",
       authorExternalRef: "U_alice",
       bodyRaw: "suppressed",
+      mentionedExternalRefs: [],
       createdAt: new Date(),
     });
 

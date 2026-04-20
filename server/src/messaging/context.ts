@@ -5,11 +5,11 @@ import {
 } from "@paperclipai/db";
 
 type MessagingWorkspaceInstallRow = typeof messagingWorkspaceInstall.$inferSelect;
-import type { Db, MessagingRouter } from "./router.js";
-import { createMessagingRouter } from "./router.js";
+import type { Db, IssueTrackerRouter } from "./router.js";
+import { createIssueTrackerRouter } from "./router.js";
 import type { EventsProcessor } from "./events.js";
 import { createEventsProcessor } from "./events.js";
-import type { BackendKey, MessagingAdapter } from "./types.js";
+import type { BackendKey, IssueTrackerAdapter } from "./types.js";
 import { MessagingNotConfigured } from "./types.js";
 import type { StorageService } from "../storage/types.js";
 import { createFakeAdapter } from "./adapters/fake/adapter.js";
@@ -44,8 +44,8 @@ export interface ReadyMessagingContext {
   status: "ready";
   companyId: string;
   backend: BackendKey;
-  adapter: MessagingAdapter;
-  router: MessagingRouter;
+  adapter: IssueTrackerAdapter;
+  router: IssueTrackerRouter;
   events: EventsProcessor;
   workspaceInstall?: MessagingWorkspaceInstallRow;
 }
@@ -60,7 +60,7 @@ const contextCache = new Map<string, ReadyMessagingContext>();
 // A single shared FakeAdapter across all test companies — matches the old
 // global semantics (tests seed messages into the fake adapter, then read back
 // through any company's router). Built lazily on first fake resolution.
-let sharedFakeAdapter: MessagingAdapter | null = null;
+let sharedFakeAdapter: IssueTrackerAdapter | null = null;
 
 export function initMessaging(bootstrap: MessagingBootstrapDeps): void {
   deps = bootstrap;
@@ -143,7 +143,7 @@ function buildFakeContext(
     sharedFakeAdapter = createFakeAdapter();
   }
   const adapter = sharedFakeAdapter;
-  const router = createMessagingRouter({
+  const router = createIssueTrackerRouter({
     db: bootstrap.db,
     adapter,
     backend: "fake",

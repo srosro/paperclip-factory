@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { createMessagingRegistry } from "../messaging/registry.js";
-import type { MessagingAdapter, BackendKey } from "../messaging/types.js";
+import type { IssueTrackerAdapter, BackendKey } from "../messaging/types.js";
 
-function stubAdapter(key: BackendKey): MessagingAdapter {
-  return { backendKey: key } as unknown as MessagingAdapter;
+function stubAdapter(key: BackendKey): IssueTrackerAdapter {
+  return { backendKey: key } as unknown as IssueTrackerAdapter;
 }
 
 describe("messaging registry", () => {
@@ -16,12 +16,12 @@ describe("messaging registry", () => {
 
   it("require throws when retrieving an unknown backend", () => {
     const registry = createMessagingRegistry();
-    expect(() => registry.require("slack")).toThrow(/no messaging adapter/i);
+    expect(() => registry.require("linear")).toThrow(/no messaging adapter/i);
   });
 
   it("get returns undefined for unknown backend", () => {
     const registry = createMessagingRegistry();
-    expect(registry.get("slack")).toBeUndefined();
+    expect(registry.get("linear")).toBeUndefined();
   });
 
   it("rejects duplicate registration of the same backend", () => {
@@ -40,7 +40,7 @@ describe("messaging registry", () => {
   it("list returns all registered adapters", () => {
     const registry = createMessagingRegistry();
     registry.register(stubAdapter("fake"));
-    registry.register(stubAdapter("slack"));
+    registry.register(stubAdapter("linear"));
     expect(registry.list()).toHaveLength(2);
   });
 });

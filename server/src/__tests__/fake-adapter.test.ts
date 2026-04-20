@@ -2,140 +2,145 @@ import { describe, it, expect } from "vitest";
 import { createFakeAdapter } from "../messaging/adapters/fake/adapter.js";
 import type { MessagingEvent } from "../messaging/types.js";
 
+const AUTHOR = {
+  backend: "fake" as const,
+  externalUserRef: "U_A",
+  credential: { kind: "none" as const },
+};
+
 describe("FakeAdapter", () => {
-  it("creates a channel and returns a unique external ref", async () => {
+  it("creates an issue and emits a synchronous issue_created event", async () => {
     const adapter = createFakeAdapter();
-    const a = await adapter.createChannel({ name: "proj-a", purpose: "project" });
-    const b = await adapter.createChannel({ name: "proj-b", purpose: "project" });
-    expect(a.externalRef).not.toBe(b.externalRef);
-  });
-
-  it("posts a message and echoes it as a synchronous inbound event", async () => {
-    const adapter = createFakeAdapter();
-    const ch = await adapter.createChannel({ name: "proj-x", purpose: "project" });
-    const th = await adapter.createThread({
-      channelRef: ch.externalRef,
-      parentBlocks: null,
-      fallbackText: "issue card",
+    const events: MessagingEvent[] = [];
+    adapter.onLocalEvent((e) => events.push(e));
+    const issue = await adapter.createIssue({
+      externalTeamRef: "T_1",
+      title: "First",
+      author: AUTHOR,
     });
-
-    const echoed: MessagingEvent[] = [];
-    adapter.onLocalEvent((e) => echoed.push(e));
-
-    await adapter.postMessage({
-      channelRef: ch.externalRef,
-      threadRef: th.threadRef,
-      authorIdentity: { backend: "fake", externalUserRef: "U_A", credential: { kind: "none" } },
-      body: "hello",
-    });
-
-    expect(echoed).toHaveLength(1);
-    expect(echoed[0]).toMatchObject({
-      kind: "message",
-      bodyRaw: "hello",
-      authorExternalRef: "U_A",
+    expect(issue.externalIssueRef).toBeTruthy();
+    expect(issue.identifier).toMatch(/^FAKE-\d+$/);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: "issue_created",
+      externalIssueRef: issue.externalIssueRef,
     });
   });
 
-  it("getThreadMessages returns posted messages in order", async () => {
+  it("updateIssue emits issue_updated with changed fields", async () => {
     const adapter = createFakeAdapter();
-    const ch = await adapter.createChannel({ name: "proj-y", purpose: "project" });
-    const th = await adapter.createThread({
-      channelRef: ch.externalRef,
-      parentBlocks: null,
-      fallbackText: "card",
+    const issue = await adapter.createIssue({
+      externalTeamRef: "T_1",
+      title: "x",
+      author: AUTHOR,
     });
-    const identity = {
-      backend: "fake" as const,
-      externalUserRef: "U_A",
-      credential: { kind: "none" as const },
-    };
-    const a = await adapter.postMessage({
-      channelRef: ch.externalRef,
-      threadRef: th.threadRef,
-      authorIdentity: identity,
-      body: "first",
+    const events: MessagingEvent[] = [];
+    adapter.onLocalEvent((e) => events.push(e));
+    await adapter.updateIssue({
+      externalIssueRef: issue.externalIssueRef,
+      title: "y",
+      author: AUTHOR,
     });
-    const b = await adapter.postMessage({
-      channelRef: ch.externalRef,
-      threadRef: th.threadRef,
-      authorIdentity: identity,
-      body: "second",
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: "issue_updated",
+      changedFields: ["title"],
     });
-    const msgs = await adapter.getThreadMessages(ch.externalRef, th.threadRef);
-    expect(msgs.map((m) => m.externalMessageRef)).toEqual([a.messageRef, b.messageRef]);
-    expect(msgs.map((m) => m.body)).toEqual(["first", "second"]);
   });
 
-  it("editMessage updates body and emits message_changed event", async () => {
+  it("postComment emits comment_created and is returned by getComments", async () => {
     const adapter = createFakeAdapter();
-    const ch = await adapter.createChannel({ name: "proj-z", purpose: "project" });
-    const th = await adapter.createThread({
-      channelRef: ch.externalRef,
-      parentBlocks: null,
-      fallbackText: "card",
+    const issue = await adapter.createIssue({
+      externalTeamRef: "T_1",
+      title: "x",
+      author: AUTHOR,
     });
     const events: MessagingEvent[] = [];
     adapter.onLocalEvent((e) => events.push(e));
 
-    const posted = await adapter.postMessage({
-      channelRef: ch.externalRef,
-      threadRef: th.threadRef,
-      authorIdentity: { backend: "fake", externalUserRef: "U_A", credential: { kind: "none" } },
+    const c1 = await adapter.postComment({
+      externalIssueRef: issue.externalIssueRef,
+      author: AUTHOR,
+      body: "first",
+    });
+    const c2 = await adapter.postComment({
+      externalIssueRef: issue.externalIssueRef,
+      author: AUTHOR,
+      body: "second",
+    });
+
+    expect(events.map((e) => e.kind)).toEqual(["comment_created", "comment_created"]);
+    const comments = await adapter.getComments(issue.externalIssueRef);
+    expect(comments.map((c) => c.externalCommentRef)).toEqual([
+      c1.externalCommentRef,
+      c2.externalCommentRef,
+    ]);
+    expect(comments.map((c) => c.body)).toEqual(["first", "second"]);
+  });
+
+  it("editComment mutates body and emits comment_updated", async () => {
+    const adapter = createFakeAdapter();
+    const issue = await adapter.createIssue({
+      externalTeamRef: "T_1",
+      title: "x",
+      author: AUTHOR,
+    });
+    const posted = await adapter.postComment({
+      externalIssueRef: issue.externalIssueRef,
+      author: AUTHOR,
       body: "v1",
     });
-    await adapter.editMessage(ch.externalRef, posted.messageRef, "v2");
-
-    const msgs = await adapter.getThreadMessages(ch.externalRef, th.threadRef);
-    expect(msgs[0]!.body).toBe("v2");
-    expect(msgs[0]!.editedAt).toBeDefined();
-    expect(events.map((e) => e.kind)).toEqual(["message", "message_changed"]);
+    const events: MessagingEvent[] = [];
+    adapter.onLocalEvent((e) => events.push(e));
+    await adapter.editComment(posted.externalCommentRef, "v2");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "comment_updated", bodyRaw: "v2" });
+    const comments = await adapter.getComments(issue.externalIssueRef);
+    expect(comments[0]!.body).toBe("v2");
   });
 
-  it("deleteMessage sets deletedAt and hides from getThreadMessages", async () => {
+  it("deleteComment sets deletedAt and emits comment_deleted", async () => {
     const adapter = createFakeAdapter();
-    const ch = await adapter.createChannel({ name: "proj-d", purpose: "project" });
-    const th = await adapter.createThread({
-      channelRef: ch.externalRef,
-      parentBlocks: null,
-      fallbackText: "card",
+    const issue = await adapter.createIssue({
+      externalTeamRef: "T_1",
+      title: "x",
+      author: AUTHOR,
     });
-    const identity = {
-      backend: "fake" as const,
-      externalUserRef: "U_A",
-      credential: { kind: "none" as const },
-    };
-    const posted = await adapter.postMessage({
-      channelRef: ch.externalRef,
-      threadRef: th.threadRef,
-      authorIdentity: identity,
+    const posted = await adapter.postComment({
+      externalIssueRef: issue.externalIssueRef,
+      author: AUTHOR,
       body: "gone",
     });
-    await adapter.deleteMessage(ch.externalRef, posted.messageRef, identity);
-    const msgs = await adapter.getThreadMessages(ch.externalRef, th.threadRef);
-    expect(msgs).toHaveLength(0);
+    const events: MessagingEvent[] = [];
+    adapter.onLocalEvent((e) => events.push(e));
+    await adapter.deleteComment(posted.externalCommentRef, AUTHOR);
+    expect(events[0]).toMatchObject({ kind: "comment_deleted" });
   });
 
-  it("failNextPost injects failure into the next postMessage only", async () => {
+  it("ensureLabel is idempotent per name", async () => {
     const adapter = createFakeAdapter();
-    const ch = await adapter.createChannel({ name: "proj-f", purpose: "project" });
-    const th = await adapter.createThread({
-      channelRef: ch.externalRef,
-      parentBlocks: null,
-      fallbackText: "card",
+    const a = await adapter.ensureLabel("company-x", "bug");
+    const b = await adapter.ensureLabel("company-x", "bug");
+    const c = await adapter.ensureLabel("company-x", "feature");
+    expect(a).toBe(b);
+    expect(a).not.toBe(c);
+  });
+
+  it("setIssueLabels tracks added/removed labels and emits labels_changed", async () => {
+    const adapter = createFakeAdapter();
+    const issue = await adapter.createIssue({
+      externalTeamRef: "T_1",
+      title: "x",
+      author: AUTHOR,
     });
-    const args = {
-      channelRef: ch.externalRef,
-      threadRef: th.threadRef,
-      authorIdentity: {
-        backend: "fake" as const,
-        externalUserRef: "U_A",
-        credential: { kind: "none" as const },
-      },
-      body: "retry me",
-    };
-    adapter.failNextPost("rate_limited");
-    await expect(adapter.postMessage(args)).rejects.toThrow(/rate_limited/);
-    await expect(adapter.postMessage(args)).resolves.toBeDefined();
+    const bugLabel = await adapter.ensureLabel("c", "bug");
+    const events: MessagingEvent[] = [];
+    adapter.onLocalEvent((e) => events.push(e));
+    await adapter.setIssueLabels(issue.externalIssueRef, [bugLabel]);
+    expect(events[0]).toMatchObject({
+      kind: "labels_changed",
+      addedExternalLabelRefs: [bugLabel],
+      removedExternalLabelRefs: [],
+    });
   });
 });

@@ -13,8 +13,7 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issues,
-  messagingMessageRefs,
-  messagingThreads,
+  issueCommentRefs,
   projects,
 } from "@paperclipai/db";
 import {
@@ -604,17 +603,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(issue?.status).toBe("blocked");
 
     const commentRefs = await db
-      .select({ id: messagingMessageRefs.id })
-      .from(messagingMessageRefs)
-      .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-      .where(eq(messagingThreads.issueId, issueId));
+      .select({ id: issueCommentRefs.id })
+      .from(issueCommentRefs)
+      .where(eq(issueCommentRefs.issueId, issueId));
     expect(commentRefs).toHaveLength(1);
     // Body lives in the messaging backend; fetch via the router-equivalent
     // path exposed on the test helper rather than via SQL.
     const bodies = await (async () => {
       const { requireMessagingContext } = await import("../messaging/index.js");
       const ctx = await requireMessagingContext(companyId);
-      const msgs = await ctx.router.getThreadMessages({ issueId });
+      const msgs = await ctx.router.getComments({ issueId });
       return msgs.map((m) => m.body);
     })();
     expect(bodies.join("\n")).toContain("retried dispatch");
@@ -665,15 +663,14 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(issue?.status).toBe("blocked");
 
     const commentRefs = await db
-      .select({ id: messagingMessageRefs.id })
-      .from(messagingMessageRefs)
-      .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-      .where(eq(messagingThreads.issueId, issueId));
+      .select({ id: issueCommentRefs.id })
+      .from(issueCommentRefs)
+      .where(eq(issueCommentRefs.issueId, issueId));
     expect(commentRefs).toHaveLength(1);
     const bodies = await (async () => {
       const { requireMessagingContext } = await import("../messaging/index.js");
       const ctx = await requireMessagingContext(companyId);
-      const msgs = await ctx.router.getThreadMessages({ issueId });
+      const msgs = await ctx.router.getComments({ issueId });
       return msgs.map((m) => m.body);
     })();
     expect(bodies.join("\n")).toContain("retried continuation");

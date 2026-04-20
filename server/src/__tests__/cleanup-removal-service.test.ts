@@ -11,10 +11,8 @@ import {
   issueExecutionDecisions,
   issueReadStates,
   issues,
-  messagingChannels,
+  issueCommentRefs,
   messagingIdentities,
-  messagingMessageRefs,
-  messagingThreads,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -23,7 +21,7 @@ import {
 import {
   clearMessagingFixtures,
   ensureTestMessaging,
-  seedMessagingComment,
+  seedIssueComment,
   seedMessagingIdentity,
 } from "./helpers/messaging-test-seed.js";
 import { agentService } from "../services/agents.ts";
@@ -116,7 +114,7 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     const { agentId, companyId, issueId, runId } = await seedFixture();
 
     await seedMessagingIdentity(db, { companyId, agentId });
-    const refId = await seedMessagingComment(db, {
+    const refId = await seedIssueComment(db, {
       companyId,
       issueId,
       authorAgentId: agentId,
@@ -155,9 +153,9 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     // The messaging ref is preserved (history intact); authorAgentId is
     // nulled so deleting the agent doesn't leak a dangling FK.
     const refsAfter = await db
-      .select({ id: messagingMessageRefs.id, authorAgentId: messagingMessageRefs.authorAgentId })
-      .from(messagingMessageRefs)
-      .where(eq(messagingMessageRefs.id, refId));
+      .select({ id: issueCommentRefs.id, authorAgentId: issueCommentRefs.authorAgentId })
+      .from(issueCommentRefs)
+      .where(eq(issueCommentRefs.id, refId));
     expect(refsAfter).toHaveLength(1);
     expect(refsAfter[0]!.authorAgentId).toBeNull();
     // The agent's messaging identity is removed.
@@ -171,7 +169,7 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     const { companyId, issueId, runId } = await seedFixture();
 
     // Seed a messaging ref + thread so the cascade path exercises messaging cleanup.
-    await seedMessagingComment(db, {
+    await seedIssueComment(db, {
       companyId,
       issueId,
       authorUserId: "user-1",
@@ -213,12 +211,9 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     await expect(db.select().from(issues).where(eq(issues.id, issueId))).resolves.toHaveLength(0);
     await expect(db.select().from(issueReadStates).where(eq(issueReadStates.companyId, companyId))).resolves.toHaveLength(0);
     await expect(db.select().from(activityLog).where(eq(activityLog.companyId, companyId))).resolves.toHaveLength(0);
-    // Messaging cascade: threads + channels + refs for this company are gone.
+    // Messaging cascade: comment refs for this company's issues are gone.
     await expect(
-      db.select().from(messagingThreads).where(eq(messagingThreads.issueId, issueId)),
-    ).resolves.toHaveLength(0);
-    await expect(
-      db.select().from(messagingChannels).where(eq(messagingChannels.companyId, companyId)),
+      db.select().from(issueCommentRefs).where(eq(issueCommentRefs.issueId, issueId)),
     ).resolves.toHaveLength(0);
   });
 });

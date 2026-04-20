@@ -16,12 +16,11 @@ import {
   ensurePostgresDatabase,
   heartbeatRuns,
   issues,
-  messagingMessageRefs,
-  messagingThreads,
+  issueCommentRefs,
 } from "@paperclipai/db";
 import {
   ensureTestMessaging,
-  seedMessagingComment,
+  seedIssueComment,
   seedMessagingIdentity,
 } from "./helpers/messaging-test-seed.js";
 import { heartbeatService } from "../services/heartbeat.ts";
@@ -294,7 +293,7 @@ describe("heartbeat comment wake batching", () => {
       await seedMessagingIdentity(db, { companyId, userId: "user-1" });
       await seedMessagingIdentity(db, { companyId, agentId });
       const comment1 = {
-        id: await seedMessagingComment(db, {
+        id: await seedIssueComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
@@ -319,7 +318,7 @@ describe("heartbeat comment wake batching", () => {
       expect(firstRun).not.toBeNull();
       await waitFor(() => gateway.getAgentPayloads().length === 1);
 
-      await seedMessagingComment(db, {
+      await seedIssueComment(db, {
         companyId,
         issueId,
         authorAgentId: agentId,
@@ -328,7 +327,7 @@ describe("heartbeat comment wake batching", () => {
       });
 
       const comment2 = {
-        id: await seedMessagingComment(db, {
+        id: await seedIssueComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
@@ -336,7 +335,7 @@ describe("heartbeat comment wake batching", () => {
         }),
       };
       const comment3 = {
-        id: await seedMessagingComment(db, {
+        id: await seedIssueComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
@@ -483,7 +482,7 @@ describe("heartbeat comment wake batching", () => {
       await seedMessagingIdentity(db, { companyId, userId: "user-1" });
       await seedMessagingIdentity(db, { companyId, agentId });
       const comment1 = {
-        id: await seedMessagingComment(db, {
+        id: await seedIssueComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
@@ -517,7 +516,7 @@ describe("heartbeat comment wake batching", () => {
       });
 
       const comment2 = {
-        id: await seedMessagingComment(db, {
+        id: await seedIssueComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
@@ -744,9 +743,8 @@ describe("heartbeat comment wake batching", () => {
 
       const comments = await db
         .select()
-        .from(messagingMessageRefs)
-        .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-        .where(eq(messagingThreads.issueId, issueId));
+        .from(issueCommentRefs)
+        .where(eq(issueCommentRefs.issueId, issueId));
       expect(comments).toHaveLength(0);
 
       await waitFor(async () => {
@@ -858,7 +856,7 @@ describe("heartbeat comment wake batching", () => {
 
       await seedMessagingIdentity(db, { companyId, userId: "user-1" });
       const mentionComment = {
-        id: await seedMessagingComment(db, {
+        id: await seedIssueComment(db, {
           companyId,
           issueId,
           authorUserId: "user-1",
@@ -996,7 +994,7 @@ describe("heartbeat comment wake batching", () => {
       await waitFor(() => gateway.getAgentPayloads().length === 1);
 
       await seedMessagingIdentity(db, { companyId, agentId });
-      await seedMessagingComment(db, {
+      await seedIssueComment(db, {
         companyId,
         issueId,
         authorAgentId: agentId,
@@ -1026,20 +1024,19 @@ describe("heartbeat comment wake batching", () => {
 
       const commentRefs = await db
         .select({
-          id: messagingMessageRefs.id,
-          createdByRunId: messagingMessageRefs.createdByRunId,
+          id: issueCommentRefs.id,
+          createdByRunId: issueCommentRefs.createdByRunId,
         })
-        .from(messagingMessageRefs)
-        .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-        .where(eq(messagingThreads.issueId, issueId))
-        .orderBy(asc(messagingMessageRefs.firstSeenAt));
+        .from(issueCommentRefs)
+        .where(eq(issueCommentRefs.issueId, issueId))
+        .orderBy(asc(issueCommentRefs.firstSeenAt));
 
       expect(commentRefs).toHaveLength(1);
       expect(commentRefs[0]?.createdByRunId).toBe(firstRun?.id);
       // Body comes from the messaging backend, not Postgres.
       const { requireMessagingContext } = await import("../messaging/index.js");
       const ctx = await requireMessagingContext(companyId);
-      const msgs = await ctx.router.getThreadMessages({ issueId });
+      const msgs = await ctx.router.getComments({ issueId });
       expect(msgs.map((m) => m.body)).toContain("Manual completion comment from the run.");
 
       const wakeups = await db

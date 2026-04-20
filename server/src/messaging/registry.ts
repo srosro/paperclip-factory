@@ -1,15 +1,15 @@
-import type { BackendKey, MessagingAdapter } from "./types.js";
+import type { BackendKey, IssueTrackerAdapter } from "./types.js";
 
 export interface MessagingRegistry {
-  register(adapter: MessagingAdapter): void;
+  register(adapter: IssueTrackerAdapter): void;
   unregister(key: BackendKey): void;
-  get(key: BackendKey): MessagingAdapter | undefined;
-  require(key: BackendKey): MessagingAdapter;
-  list(): MessagingAdapter[];
+  get(key: BackendKey): IssueTrackerAdapter | undefined;
+  require(key: BackendKey): IssueTrackerAdapter;
+  list(): IssueTrackerAdapter[];
 }
 
 export function createMessagingRegistry(): MessagingRegistry {
-  const byKey = new Map<BackendKey, MessagingAdapter>();
+  const byKey = new Map<BackendKey, IssueTrackerAdapter>();
   return {
     register(adapter) {
       if (byKey.has(adapter.backendKey)) {

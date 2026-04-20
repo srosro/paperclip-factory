@@ -99,7 +99,7 @@ describeIf("messaging admin status endpoint", () => {
       .insert(companySecrets)
       .values({
         companyId,
-        name: "messaging.slack.bot_token",
+        name: "messaging.linear.app_token",
         provider: "local_encrypted",
         latestVersion: 1,
       })
@@ -108,14 +108,14 @@ describeIf("messaging admin status endpoint", () => {
       .insert(companySecrets)
       .values({
         companyId,
-        name: "messaging.slack.signing_secret",
+        name: "messaging.linear.signing_secret",
         provider: "local_encrypted",
         latestVersion: 1,
       })
       .returning();
     await db.insert(messagingWorkspaceInstall).values({
       companyId,
-      backend: "slack",
+      backend: "linear",
       externalWorkspaceRef: "T_WS1",
       workspaceName: "Paperclip Test",
       botUserRef: "U_BOT",
@@ -143,14 +143,14 @@ describeIf("messaging admin status endpoint", () => {
     await db.insert(messagingIdentities).values({
       companyId,
       agentId: agentActive!.id,
-      backend: "slack",
+      backend: "linear",
       externalUserRef: "U_ALPHA",
       state: "active",
     });
     await db.insert(messagingIdentities).values({
       companyId,
       agentId: agentRevoked!.id,
-      backend: "slack",
+      backend: "linear",
       externalUserRef: "U_CHARLIE",
       state: "revoked",
     });

@@ -23,7 +23,7 @@ import {
   clearMessagingFixtures,
   ensureTestMessaging,
   postTestComment,
-  seedMessagingComment,
+  seedIssueComment,
   seedMessagingIdentity,
 } from "./helpers/messaging-test-seed.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
@@ -175,7 +175,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     ]);
 
     await seedMessagingIdentity(db, { companyId, agentId });
-    await seedMessagingComment(db, {
+    await seedIssueComment(db, {
       companyId,
       issueId: commentedIssueId,
       authorAgentId: agentId,
@@ -340,7 +340,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
       },
     ]);
 
-    await seedMessagingComment(db, {
+    await seedIssueComment(db, {
       companyId,
       issueId: commentMatchId,
       body: "Reference: https://github.com/paperclipai/paperclip/pull/3303",
@@ -523,7 +523,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await svc.archiveInbox(companyId, resurfacedIssueId, userId, new Date("2026-03-26T13:00:00.000Z"));
 
     await seedMessagingIdentity(db, { companyId, userId: otherUserId });
-    await seedMessagingComment(db, {
+    await seedIssueComment(db, {
       companyId,
       issueId: resurfacedIssueId,
       authorUserId: otherUserId,
@@ -582,7 +582,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
 
     // Old external comment before archiving
     await seedMessagingIdentity(db, { companyId, userId: otherUserId });
-    await seedMessagingComment(db, {
+    await seedIssueComment(db, {
       companyId,
       issueId,
       authorUserId: otherUserId,
@@ -662,7 +662,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
       },
     ]);
 
-    await seedMessagingComment(db, {
+    await seedIssueComment(db, {
       companyId,
       issueId: commentIssueId,
       body: "New comment without touching issue.updatedAt",
@@ -1578,7 +1578,6 @@ describeEmbeddedPostgres("issueService.findMentionedProjectIds", () => {
     await postTestComment(db, {
       companyId,
       issueId,
-      projectId: titleProjectId,
       authorUserId: "user-1",
       body: `Comment link [Comment](${buildProjectMentionHref(commentProjectId)})`,
     });

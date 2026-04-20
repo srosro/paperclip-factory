@@ -356,6 +356,3 @@ export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
   return router;
 }
 
-// Transitional aliases — removed in Task 10g final cleanup.
-export const createMessagingRouter = createIssueTrackerRouter;
-export type MessagingRouter = IssueTrackerRouter;

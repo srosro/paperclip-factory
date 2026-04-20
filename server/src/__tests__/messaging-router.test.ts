@@ -8,13 +8,11 @@ import {
   issues,
   agents,
   heartbeatRuns,
-  messagingChannels,
-  messagingThreads,
   messagingIdentities,
-  messagingMessageRefs,
+  issueCommentRefs,
 } from "@paperclipai/db";
 import { createFakeAdapter } from "../messaging/adapters/fake/adapter.js";
-import { createMessagingRouter } from "../messaging/router.js";
+import { createIssueTrackerRouter } from "../messaging/router.js";
 import { MessagingIdentityNotActive } from "../messaging/types.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -28,6 +26,7 @@ interface Seed {
   companyId: string;
   projectId: string;
   issueId: string;
+  linearIssueId: string;
   agentId: string;
 }
 
@@ -39,11 +38,9 @@ async function seed(db: ReturnType<typeof createDb>): Promise<Seed> {
     .returning();
   const [project] = await db
     .insert(projects)
-    .values({
-      companyId: company!.id,
-      name: `Plow ${suffix}`,
-    })
+    .values({ companyId: company!.id, name: `Plow ${suffix}` })
     .returning();
+  const linearIssueId = randomUUID();
   const [issue] = await db
     .insert(issues)
     .values({
@@ -51,40 +48,38 @@ async function seed(db: ReturnType<typeof createDb>): Promise<Seed> {
       projectId: project!.id,
       title: "Fix login",
       identifier: `CO${suffix}-1`,
+      linearIssueId,
+      linearIssueIdentifier: `CO${suffix}-1`,
     })
     .returning();
   const [agent] = await db
     .insert(agents)
-    .values({
-      companyId: company!.id,
-      name: `alice-${suffix}`,
-    })
+    .values({ companyId: company!.id, name: `alice-${suffix}` })
     .returning();
   return {
     companyId: company!.id,
     projectId: project!.id,
     issueId: issue!.id,
+    linearIssueId,
     agentId: agent!.id,
   };
 }
 
-describeIf("messaging router", () => {
+describeIf("issue-tracker router", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-messaging-router-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-router-");
     db = createDb(tempDb.connectionString);
   }, 30_000);
 
   afterEach(async () => {
-    await db.delete(messagingMessageRefs);
-    await db.delete(messagingThreads);
+    await db.delete(issueCommentRefs);
     await db.delete(messagingIdentities);
-    await db.delete(messagingChannels);
     await db.delete(heartbeatRuns);
-    await db.delete(issues);
     await db.delete(agents);
+    await db.delete(issues);
     await db.delete(projects);
     await db.delete(companies);
   });
@@ -93,204 +88,132 @@ describeIf("messaging router", () => {
     await tempDb?.cleanup();
   });
 
-  it("getOrCreateChannel is idempotent and slugs project names", async () => {
+  it("postComment stores a ref and preserves createdByRunId", async () => {
     const s = await seed(db);
     const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
+    // Seed the adapter's internal issue so the comment posts cleanly.
+    await db
+      .update(issues)
+      .set({ linearIssueId: (await adapter.createIssue({
+        externalTeamRef: "T_1",
+        title: "x",
+        author: { backend: "fake", externalUserRef: "SYSTEM", credential: { kind: "none" } },
+      })).externalIssueRef })
+      .where(eq(issues.id, s.issueId));
+    const router = createIssueTrackerRouter({ db, adapter, backend: "fake" });
 
-    const a = await router.getOrCreateChannel({ companyId: s.companyId, projectId: s.projectId });
-    const b = await router.getOrCreateChannel({ companyId: s.companyId, projectId: s.projectId });
-    expect(a.id).toBe(b.id);
-
-    const rows = await db
-      .select()
-      .from(messagingChannels)
-      .where(eq(messagingChannels.projectId, s.projectId));
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.externalChannelName).toMatch(/^proj-/);
-  });
-
-  it("getOrCreateThread posts an issue card once per issue", async () => {
-    const s = await seed(db);
-    const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
-
-    const a = await router.getOrCreateThread({
-      companyId: s.companyId,
-      issueId: s.issueId,
-      projectId: s.projectId,
-    });
-    const b = await router.getOrCreateThread({
-      companyId: s.companyId,
-      issueId: s.issueId,
-      projectId: s.projectId,
-    });
-    expect(a.id).toBe(b.id);
-
-    const rows = await db
-      .select()
-      .from(messagingThreads)
-      .where(eq(messagingThreads.issueId, s.issueId));
-    expect(rows).toHaveLength(1);
-  });
-
-  it("postMessage stores a ref with createdByRunId preserved", async () => {
-    const s = await seed(db);
-    await db.insert(messagingIdentities).values({
-      companyId: s.companyId,
-      agentId: s.agentId,
-      backend: "fake",
-      externalUserRef: "U_alice",
-      state: "active",
-    });
-
-    const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
+    await db
+      .insert(messagingIdentities)
+      .values({
+        companyId: s.companyId,
+        agentId: s.agentId,
+        backend: "fake",
+        externalUserRef: "U_A",
+        state: "active",
+      });
 
     const [run] = await db
       .insert(heartbeatRuns)
       .values({ companyId: s.companyId, agentId: s.agentId })
       .returning();
 
-    const posted = await router.postMessage({
+    const posted = await router.postComment({
       companyId: s.companyId,
       issueId: s.issueId,
-      projectId: s.projectId,
       authorAgentId: s.agentId,
       body: "hello",
       createdByRunId: run!.id,
     });
 
-    const [row] = await db
+    const [ref] = await db
       .select()
-      .from(messagingMessageRefs)
-      .where(eq(messagingMessageRefs.id, posted.id));
-    expect(row!.createdByRunId).toBe(run!.id);
-    expect(row!.authorAgentId).toBe(s.agentId);
+      .from(issueCommentRefs)
+      .where(eq(issueCommentRefs.id, posted.id));
+    expect(ref.createdByRunId).toBe(run!.id);
+    expect(ref.authorAgentId).toBe(s.agentId);
   });
 
-  it("postMessage falls back to bot_system authoring when identity is missing", async () => {
-    // Before Slack OAuth completes for a newly-hired agent, the agent has no
-    // messaging_identities row. The router falls back to bot_system rather
-    // than throwing, so the org stays functional while onboarding catches up.
-    // The ref row still records the agent id.
+  it("falls back to bot_system authoring when no identity is present", async () => {
     const s = await seed(db);
     const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
-
-    const posted = await router.postMessage({
-      companyId: s.companyId,
-      issueId: s.issueId,
-      projectId: s.projectId,
-      authorAgentId: s.agentId,
-      body: "no identity yet",
-    });
-    expect(posted.id).toBeTruthy();
-
-    // A pending_auth identity is a misconfiguration and still throws.
-    await db.insert(messagingIdentities).values({
-      companyId: s.companyId,
-      agentId: s.agentId,
-      backend: "fake",
-      externalUserRef: "U_pending",
-      state: "pending_auth",
-    });
+    await db
+      .update(issues)
+      .set({ linearIssueId: (await adapter.createIssue({
+        externalTeamRef: "T_1",
+        title: "x",
+        author: { backend: "fake", externalUserRef: "SYSTEM", credential: { kind: "none" } },
+      })).externalIssueRef })
+      .where(eq(issues.id, s.issueId));
+    const router = createIssueTrackerRouter({ db, adapter, backend: "fake" });
+    // No identity seeded for s.agentId — should succeed anyway, as bot_system.
     await expect(
-      router.postMessage({
+      router.postComment({
         companyId: s.companyId,
         issueId: s.issueId,
-        projectId: s.projectId,
         authorAgentId: s.agentId,
-        body: "pending auth",
+        body: "hello",
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it("throws MessagingIdentityNotActive when identity is revoked", async () => {
+    const s = await seed(db);
+    const adapter = createFakeAdapter();
+    await db
+      .update(issues)
+      .set({ linearIssueId: (await adapter.createIssue({
+        externalTeamRef: "T_1",
+        title: "x",
+        author: { backend: "fake", externalUserRef: "SYSTEM", credential: { kind: "none" } },
+      })).externalIssueRef })
+      .where(eq(issues.id, s.issueId));
+    const router = createIssueTrackerRouter({ db, adapter, backend: "fake" });
+    await db
+      .insert(messagingIdentities)
+      .values({
+        companyId: s.companyId,
+        agentId: s.agentId,
+        backend: "fake",
+        externalUserRef: "U_A",
+        state: "revoked",
+      });
+    await expect(
+      router.postComment({
+        companyId: s.companyId,
+        issueId: s.issueId,
+        authorAgentId: s.agentId,
+        body: "hi",
       }),
     ).rejects.toBeInstanceOf(MessagingIdentityNotActive);
   });
 
-  it("getThreadMessages returns refs zipped with live adapter bodies", async () => {
-    const s = await seed(db);
-    await db.insert(messagingIdentities).values({
-      companyId: s.companyId,
-      agentId: s.agentId,
-      backend: "fake",
-      externalUserRef: "U_alice",
-      state: "active",
-    });
-
-    const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
-
-    const postArgs = {
-      companyId: s.companyId,
-      issueId: s.issueId,
-      projectId: s.projectId,
-      authorAgentId: s.agentId,
-    };
-    await router.postMessage({ ...postArgs, body: "first" });
-    await router.postMessage({ ...postArgs, body: "second" });
-
-    const messages = await router.getThreadMessages({ issueId: s.issueId });
-    expect(messages.map((m) => m.body)).toEqual(["first", "second"]);
-    expect(messages.every((m) => m.authorAgentId === s.agentId)).toBe(true);
-  });
-
-  it("onIssueStateChange edits the thread parent message", async () => {
+  it("getComments returns refs zipped with live adapter bodies", async () => {
     const s = await seed(db);
     const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
-
-    const thread = await router.getOrCreateThread({
-      companyId: s.companyId,
-      issueId: s.issueId,
-      projectId: s.projectId,
+    const liveIssue = await adapter.createIssue({
+      externalTeamRef: "T_1",
+      title: "x",
+      author: { backend: "fake", externalUserRef: "SYSTEM", credential: { kind: "none" } },
     });
-    const [threadRow] = await db
-      .select()
-      .from(messagingThreads)
-      .where(eq(messagingThreads.id, thread.id));
-
     await db
       .update(issues)
-      .set({ status: "in_progress", title: "Fix login 2" })
+      .set({ linearIssueId: liveIssue.externalIssueRef })
       .where(eq(issues.id, s.issueId));
+    const router = createIssueTrackerRouter({ db, adapter, backend: "fake" });
 
-    await router.onIssueStateChange(s.issueId);
-
-    const [ch] = await db
-      .select()
-      .from(messagingChannels)
-      .where(eq(messagingChannels.id, thread.channelId));
-    const parent = await adapter.getMessage(
-      ch!.externalChannelRef,
-      threadRow!.parentMessageRef,
-    );
-    expect(parent?.body).toContain("Fix login 2");
-    expect(parent?.body).toContain("in_progress");
-  });
-
-  it("ensureChannelMember adds identity to channel members", async () => {
-    const s = await seed(db);
-    await db.insert(messagingIdentities).values({
+    const first = await router.postComment({
       companyId: s.companyId,
-      agentId: s.agentId,
-      backend: "fake",
-      externalUserRef: "U_alice",
-      state: "active",
+      issueId: s.issueId,
+      body: "alpha",
+    });
+    const second = await router.postComment({
+      companyId: s.companyId,
+      issueId: s.issueId,
+      body: "beta",
     });
 
-    const adapter = createFakeAdapter();
-    const router = createMessagingRouter({ db, adapter, backend: "fake" });
-
-    await router.ensureChannelMember({
-      companyId: s.companyId,
-      projectId: s.projectId,
-      agentId: s.agentId,
-    });
-    // FakeAdapter doesn't expose member list publicly, so this is a smoke test:
-    // the call should not throw and the channel row should exist.
-    const rows = await db
-      .select()
-      .from(messagingChannels)
-      .where(eq(messagingChannels.projectId, s.projectId));
-    expect(rows).toHaveLength(1);
+    const comments = await router.getComments({ issueId: s.issueId });
+    expect(comments.map((c) => c.refId).sort()).toEqual([first.id, second.id].sort());
+    expect(comments.map((c) => c.body).sort()).toEqual(["alpha", "beta"]);
   });
 });

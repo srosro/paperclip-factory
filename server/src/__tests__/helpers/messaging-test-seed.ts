@@ -1,11 +1,9 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
   authUsers,
-  messagingChannels,
+  issueCommentRefs,
+  issues as issuesTable,
   messagingIdentities,
-  messagingMessageRefs,
-  messagingThreads,
-  projects,
   type Db as SchemaDb,
 } from "@paperclipai/db";
 import {
@@ -31,16 +29,11 @@ async function ensureAuthUser(db: Db, userId: string): Promise<void> {
     .onConflictDoNothing({ target: authUsers.id });
 }
 
-// Re-initialize messaging for each test run with a fresh FakeAdapter echo.
-// testFallbackBackend: 'fake' makes per-company resolution fall through to
-// the FakeAdapter when no messaging_company_config row exists, matching the
-// pre-hardening test semantics.
 export async function ensureTestMessaging(db: Db): Promise<void> {
   resetMessagingForTests();
   initMessaging({ db, testFallbackBackend: "fake" });
 }
 
-/** Reset the per-company context cache so tests that re-seed get fresh state. */
 export function resetTestMessagingCache(companyId: string): void {
   invalidateMessagingContext(companyId);
 }
@@ -60,14 +53,11 @@ export async function seedMessagingIdentity(
   if (args.userId) {
     await ensureAuthUser(db, args.userId);
   }
-  // Scope externalUserRef by companyId so fixtures across companies don't
-  // collide on the (backend, externalUserRef) unique index.
   const principal = args.agentId ?? args.userId ?? "anon";
   const externalUserRef =
     args.externalUserRef ??
     `U_${args.companyId.slice(0, 8)}_${principal.slice(0, 12)}`;
 
-  // Skip if already present for this (companyId, backend, agent|user).
   const where = args.agentId
     ? and(
         eq(messagingIdentities.companyId, args.companyId),
@@ -97,18 +87,16 @@ export async function seedMessagingIdentity(
 }
 
 /**
- * Seed a messaging_message_refs row for a given (companyId, issueId), creating
- * the channel + thread on demand. Registers the body with the FakeAdapter so
- * `router.getThreadMessages` returns it. Returns the new ref id (which is the
- * value the legacy tests treated as `issueComments.id`).
+ * Seed an issue_comment_refs row for a given (companyId, issueId). Ensures
+ * the issue has a linear_issue_id so the router can resolve live bodies
+ * from the FakeAdapter. Returns the new ref id.
  */
-export async function seedMessagingComment(
+export async function seedIssueComment(
   db: Db,
   args: {
     id?: string;
     companyId: string;
     issueId: string;
-    projectId?: string | null;
     authorAgentId?: string | null;
     authorUserId?: string | null;
     body: string;
@@ -117,108 +105,38 @@ export async function seedMessagingComment(
     deletedAt?: Date | null;
   },
 ): Promise<string> {
-  // Ensure channel exists for the project (or a synthetic one if no project).
-  let channelId: string;
-  const projectId = args.projectId ?? null;
-  if (projectId) {
-    const existingChannel = await db
-      .select()
-      .from(messagingChannels)
-      .where(
-        and(
-          eq(messagingChannels.companyId, args.companyId),
-          eq(messagingChannels.backend, "fake"),
-          eq(messagingChannels.projectId, projectId),
-        ),
-      )
-      .limit(1);
-    if (existingChannel[0]) {
-      channelId = existingChannel[0].id;
-    } else {
-      const [newChannel] = await db
-        .insert(messagingChannels)
-        .values({
-          companyId: args.companyId,
-          backend: "fake",
-          purpose: "project",
-          projectId,
-          externalChannelRef: `C_test_${projectId.slice(0, 8)}`,
-          externalChannelName: `proj-${projectId.slice(0, 6)}`,
-        })
-        .returning();
-      channelId = newChannel!.id;
-    }
-  } else {
-    // ad_hoc channel for tests that don't set projectId
-    const adhocRef = `C_adhoc_${args.issueId.slice(0, 8)}`;
-    const existingChannel = await db
-      .select()
-      .from(messagingChannels)
-      .where(
-        and(
-          eq(messagingChannels.backend, "fake"),
-          eq(messagingChannels.externalChannelRef, adhocRef),
-        ),
-      )
-      .limit(1);
-    if (existingChannel[0]) {
-      channelId = existingChannel[0].id;
-    } else {
-      const [newChannel] = await db
-        .insert(messagingChannels)
-        .values({
-          companyId: args.companyId,
-          backend: "fake",
-          purpose: "ad_hoc",
-          externalChannelRef: adhocRef,
-          externalChannelName: `adhoc-${args.issueId.slice(0, 6)}`,
-        })
-        .returning();
-      channelId = newChannel!.id;
-    }
+  // Ensure the issue has a linearIssueId so the router can round-trip.
+  const issueRow = await db
+    .select({
+      id: issuesTable.id,
+      linearIssueId: issuesTable.linearIssueId,
+    })
+    .from(issuesTable)
+    .where(eq(issuesTable.id, args.issueId))
+    .then((rows: Array<{ id: string; linearIssueId: string | null }>) => rows[0]);
+  if (!issueRow) {
+    throw new Error(`seedIssueComment: issue ${args.issueId} not found`);
+  }
+  let externalIssueRef = issueRow.linearIssueId;
+  if (!externalIssueRef) {
+    externalIssueRef = crypto.randomUUID();
+    await db
+      .update(issuesTable)
+      .set({
+        linearIssueId: externalIssueRef,
+        linearIssueIdentifier: `FAKE-${args.issueId.slice(0, 6)}`,
+      })
+      .where(eq(issuesTable.id, args.issueId));
   }
 
-  let threadId: string;
-  let threadRef: string;
-  let channelRef: string;
-  {
-    const channelRow = await db
-      .select()
-      .from(messagingChannels)
-      .where(eq(messagingChannels.id, channelId))
-      .limit(1);
-    channelRef = channelRow[0]!.externalChannelRef;
-  }
-  const existingThread = await db
-    .select()
-    .from(messagingThreads)
-    .where(eq(messagingThreads.issueId, args.issueId))
-    .limit(1);
-  if (existingThread[0]) {
-    threadId = existingThread[0].id;
-    threadRef = existingThread[0].externalThreadRef;
-  } else {
-    threadRef = `M_thread_${args.issueId.slice(0, 8)}`;
-    const [newThread] = await db
-      .insert(messagingThreads)
-      .values({
-        issueId: args.issueId,
-        channelId,
-        backend: "fake",
-        externalThreadRef: threadRef,
-        parentMessageRef: threadRef,
-      })
-      .returning();
-    threadId = newThread!.id;
-  }
+  if (args.authorUserId) await ensureAuthUser(db, args.authorUserId);
 
   const externalMessageRef = `M_test_${Math.random().toString(36).slice(2, 10)}`;
-  if (args.authorUserId) await ensureAuthUser(db, args.authorUserId);
   const [refRow] = await db
-    .insert(messagingMessageRefs)
+    .insert(issueCommentRefs)
     .values({
       ...(args.id ? { id: args.id } : {}),
-      threadId,
+      issueId: args.issueId,
       backend: "fake",
       externalMessageRef,
       authorAgentId: args.authorAgentId ?? null,
@@ -229,27 +147,24 @@ export async function seedMessagingComment(
     })
     .returning();
 
-  // Register the body with the FakeAdapter so router.getThreadMessages can
-  // surface it alongside the ref row.
+  // Register the body with the FakeAdapter so router.getComments surfaces it.
   const ctx = await requireMessagingContext(args.companyId);
   const fakeAdapter = ctx.adapter;
   if (
-    "seedMessage" in fakeAdapter &&
-    typeof (fakeAdapter as { seedMessage?: unknown }).seedMessage === "function"
+    "seedComment" in fakeAdapter &&
+    typeof (fakeAdapter as { seedComment?: unknown }).seedComment === "function"
   ) {
     (fakeAdapter as unknown as {
-      seedMessage: (a: {
+      seedComment: (a: {
         ref: string;
-        channelRef: string;
-        threadRef: string;
+        externalIssueRef: string;
         author: string;
         body: string;
         createdAt?: Date;
       }) => void;
-    }).seedMessage({
+    }).seedComment({
       ref: externalMessageRef,
-      channelRef,
-      threadRef,
+      externalIssueRef,
       author: args.authorAgentId ?? args.authorUserId ?? "SYSTEM",
       body: args.body,
       createdAt: args.createdAt ?? new Date(),
@@ -260,35 +175,51 @@ export async function seedMessagingComment(
 }
 
 /**
- * Like seedMessagingComment but goes through the router's postMessage path,
- * which registers the body with the FakeAdapter so future router reads
- * (router.getThreadMessages) see the body. Requires a seeded identity and
- * the issue's project id so the router can create/reuse the channel.
- * Returns the message ref id.
+ * Post a comment through the router, ensuring the issue has a linearIssueId
+ * and the author identity is seeded + active. Returns the comment ref id.
  */
 export async function postTestComment(
   db: Db,
   args: {
     companyId: string;
     issueId: string;
-    projectId: string;
     authorAgentId?: string;
     authorUserId?: string;
     body: string;
     createdByRunId?: string;
   },
 ): Promise<string> {
-  // Ensure identity exists and is active.
   await seedMessagingIdentity(db, {
     companyId: args.companyId,
     agentId: args.authorAgentId,
     userId: args.authorUserId,
   });
+  // Ensure the cached issue has a linearIssueId so the router can resolve.
+  const issueRow = await db
+    .select({
+      id: issuesTable.id,
+      linearIssueId: issuesTable.linearIssueId,
+    })
+    .from(issuesTable)
+    .where(eq(issuesTable.id, args.issueId))
+    .then((rows: Array<{ id: string; linearIssueId: string | null }>) => rows[0]);
+  if (!issueRow) {
+    throw new Error(`postTestComment: issue ${args.issueId} not found`);
+  }
+  if (!issueRow.linearIssueId) {
+    await db
+      .update(issuesTable)
+      .set({
+        linearIssueId: crypto.randomUUID(),
+        linearIssueIdentifier: `FAKE-${args.issueId.slice(0, 6)}`,
+      })
+      .where(eq(issuesTable.id, args.issueId));
+  }
+
   const ctx = await requireMessagingContext(args.companyId);
-  const posted = await ctx.router.postMessage({
+  const posted = await ctx.router.postComment({
     companyId: args.companyId,
     issueId: args.issueId,
-    projectId: args.projectId,
     authorAgentId: args.authorAgentId,
     authorUserId: args.authorUserId,
     body: args.body,
@@ -299,13 +230,9 @@ export async function postTestComment(
 
 /**
  * Delete all messaging fixture rows. Call from test afterEach where the
- * suite previously called `db.delete(issueComments)`.
+ * suite previously cleared per-test state.
  */
 export async function clearMessagingFixtures(db: Db): Promise<void> {
-  void projects;
-  void sql;
-  await db.delete(messagingMessageRefs);
-  await db.delete(messagingThreads);
-  await db.delete(messagingChannels);
+  await db.delete(issueCommentRefs);
   await db.delete(messagingIdentities);
 }

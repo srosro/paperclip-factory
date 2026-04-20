@@ -7,7 +7,6 @@ import {
   MessagingBackendUnavailable,
   MessagingIdentityNotActive,
   MessagingNotConfigured,
-  MessagingThreadLocked,
 } from "../messaging/types.js";
 
 describe("translateMessagingError", () => {
@@ -27,15 +26,6 @@ describe("translateMessagingError", () => {
     expect((translated as HttpError).details).toMatchObject({
       code: "agent_identity_not_linked",
       identityId: "id-1",
-    });
-  });
-
-  it("maps MessagingThreadLocked to 409 with messaging_thread_locked", () => {
-    const translated = translateMessagingError(new MessagingThreadLocked("thread-1"));
-    expect((translated as HttpError).status).toBe(409);
-    expect((translated as HttpError).details).toMatchObject({
-      code: "messaging_thread_locked",
-      threadId: "thread-1",
     });
   });
 
