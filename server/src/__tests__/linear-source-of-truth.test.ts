@@ -4,7 +4,7 @@ import {
   afterAll, afterEach, beforeAll, describe, expect, it,
 } from "vitest";
 import {
-  agents, companies, createDb, issues, messagingEventsInbox,
+  agents, companies, createDb, issues,
   projects,
 } from "@paperclipai/db";
 import {
@@ -76,6 +76,33 @@ describeIf("cache-sync full field sync", () => {
     try {
       const ctx = await resolveMessagingContext(company!.id);
       expect(ctx.status).toBe("disabled");
+    } finally {
+      resetMessagingForTests();
+    }
+  });
+
+  it("route-level gate: requireMessagingContext throws MessagingNotConfigured → translateMessagingError maps it to 412", async () => {
+    // This tests the chain wired in the POST /companies/:companyId/issues handler:
+    //   requireMessagingContext(companyId).catch(err => { throw translateMessagingError(err) })
+    // Full HTTP route tests would need an authenticated Express app; instead we exercise
+    // the two halves directly. Integration coverage of the actual route guard is provided
+    // by the e2e fake-adapter smoke test in messaging-e2e.test.ts.
+    const [company] = await db.insert(companies)
+      .values({ name: "Gate Co", issuePrefix: "GTC" })
+      .returning();
+
+    const { requireMessagingContext, initMessaging, resetMessagingForTests } = await import("../messaging/context.js");
+    const { translateMessagingError, HttpError } = await import("../errors.js");
+    resetMessagingForTests();
+    initMessaging({ db });
+    try {
+      await expect(requireMessagingContext(company!.id)).rejects.toThrow("messaging not configured");
+
+      const { MessagingNotConfigured } = await import("../messaging/types.js");
+      const translated = translateMessagingError(new MessagingNotConfigured(company!.id));
+      expect(translated).toBeInstanceOf(HttpError);
+      expect((translated as HttpError).status).toBe(412);
+      expect((translated as HttpError).details).toMatchObject({ code: "messaging_not_configured" });
     } finally {
       resetMessagingForTests();
     }

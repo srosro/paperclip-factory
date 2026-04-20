@@ -267,7 +267,7 @@ export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
         title: args.title ?? undefined,
         description: args.description ?? undefined,
         assigneeExternalRef: args.assigneeAgentId ? undefined : null,
-        stateExternalRef: undefined,
+        stateExternalRef: args.status ?? undefined,
         priority: args.priority ?? undefined,
         author,
       });

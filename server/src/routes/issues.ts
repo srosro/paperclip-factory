@@ -68,6 +68,7 @@ import {
 import { requireMessagingContext, resolveMessagingContext } from "../messaging/index.js";
 import { mapPaperclipPriorityToLinearPriority } from "../messaging/adapters/linear/workflow-state-map.js";
 import type { WorkflowStateMap } from "../messaging/adapters/linear/workflow-state-map.js";
+import type { RouterUpdateIssueArgs } from "../messaging/router.js";
 import { handleMessageCreatedSideEffects } from "../messaging/side-effects.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
@@ -1984,7 +1985,7 @@ export function issueRoutes(
         if (patchCtx.status !== "ready") return;
         const workflowMap = (patchCtx.workspaceInstall?.metadata as Record<string, unknown> | null)
           ?.linearWorkflowStateMap as WorkflowStateMap | null | undefined;
-        const syncArgs: import("../messaging/router.js").RouterUpdateIssueArgs = {
+        const syncArgs: RouterUpdateIssueArgs = {
           companyId: patchCompanyId,
           issueId: issue.id,
           authorKind: "bot_system",
@@ -1997,7 +1998,7 @@ export function issueRoutes(
           );
         }
         if (req.body.status !== undefined && workflowMap?.kind === "complete") {
-          syncArgs.status = workflowMap.byStatus[req.body.status as keyof typeof workflowMap.byStatus] ?? null;
+          syncArgs.status = workflowMap.byStatus[issue.status as keyof typeof workflowMap.byStatus] ?? null;
         }
         return patchCtx.router.updateIssue(syncArgs);
       }).catch((err: unknown) => {
