@@ -1979,7 +1979,9 @@ export function issueRoutes(
     })();
 
     // Best-effort sync to Linear — fire and forget.
-    if (issue.linearIssueId) {
+    const hasLinearFields = req.body.title !== undefined || req.body.description !== undefined
+      || req.body.priority !== undefined || req.body.status !== undefined;
+    if (issue.linearIssueId && hasLinearFields) {
       const patchCompanyId = issue.companyId;
       resolveMessagingContext(patchCompanyId).then((patchCtx) => {
         if (patchCtx.status !== "ready") return;
