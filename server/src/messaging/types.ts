@@ -148,8 +148,11 @@ export type MessagingEvent =
       externalEventId: string;
       externalIssueRef: ExternalRef;
       changedFields: string[];
+      title?: string | null;
+      description?: string | null;
       assigneeExternalRef?: ExternalRef | null;
       stateExternalRef?: ExternalRef | null;
+      priority?: number | null;
       updatedAt: Date;
     }
   | {

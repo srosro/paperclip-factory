@@ -85,6 +85,9 @@ function normalizeIssue(
   const data = env.data as {
     id: string;
     identifier: string;
+    title?: string | null;
+    description?: string | null;
+    priority?: number | null;
     assignee?: { id: string } | null;
     state?: { id: string } | null;
   };
@@ -124,6 +127,9 @@ function normalizeIssue(
       externalEventId: eventId,
       externalIssueRef: data.id,
       changedFields,
+      title: data.title ?? null,
+      description: data.description ?? null,
+      priority: data.priority ?? null,
       assigneeExternalRef: data.assignee?.id ?? undefined,
       stateExternalRef: data.state?.id ?? undefined,
       updatedAt: at,
