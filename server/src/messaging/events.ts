@@ -24,6 +24,18 @@ export interface EventsDeps {
   resolveMentions?: (rawBody: string) => Promise<{
     agentIds: string[];
   }>;
+  /**
+   * Called after an event is accepted. Backends (Linear) plug in cache-sync
+   * handlers here — they apply the event to Paperclip's local issues /
+   * issue_comment_refs cache.
+   */
+  syncFromEvent?: (event: MessagingEvent) => Promise<void>;
+  /**
+   * Predicate for self-origination filtering. When true for a given event,
+   * the handler skips all side-effect + cache-sync work. Used by Linear to
+   * suppress webhook echoes of Paperclip-originated writes.
+   */
+  isSelfOriginated?: (event: MessagingEvent) => boolean;
 }
 
 export interface EventsProcessor {
@@ -44,6 +56,19 @@ export function createEventsProcessor(deps: EventsDeps): EventsProcessor {
         })
         .returning();
       if (inserted.length === 0) return;
+
+      if (deps.isSelfOriginated?.(event)) {
+        await deps.db
+          .update(messagingEventsInbox)
+          .set({ processedAt: new Date() })
+          .where(
+            and(
+              eq(messagingEventsInbox.backend, deps.backend),
+              eq(messagingEventsInbox.externalEventId, event.externalEventId),
+            ),
+          );
+        return;
+      }
 
       switch (event.kind) {
         case "comment_created":
@@ -66,8 +91,17 @@ export function createEventsProcessor(deps: EventsDeps): EventsProcessor {
         case "labels_changed":
         case "attachment_changed":
         case "project_changed":
-          // Cache-sync handlers land in Plan B.
+          // Handled via deps.syncFromEvent below.
           break;
+      }
+
+      if (deps.syncFromEvent) {
+        try {
+          await deps.syncFromEvent(event);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("events: syncFromEvent failed", err);
+        }
       }
 
       await deps.db

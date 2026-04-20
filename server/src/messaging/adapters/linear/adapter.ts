@@ -17,6 +17,8 @@ import type {
   UploadAttachmentArgs,
 } from "../../types.js";
 import { createLinearClient, type LinearClient } from "./client.js";
+import { normalizeLinearEvent } from "./events-normalize.js";
+import { selfOriginationTracker } from "./self-origination.js";
 import {
   MUTATION_ATTACHMENT_CREATE,
   MUTATION_COMMENT_CREATE,
@@ -144,6 +146,7 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
       if (!res.issueCreate.success || !res.issueCreate.issue) {
         throw new Error("Linear issueCreate returned success=false");
       }
+      selfOriginationTracker.mark(res.issueCreate.issue.id);
       return rawToIssueRef(res.issueCreate.issue);
     },
 
@@ -163,6 +166,7 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
       if (!res.issueUpdate.success || !res.issueUpdate.issue) {
         throw new Error("Linear issueUpdate returned success=false");
       }
+      selfOriginationTracker.mark(res.issueUpdate.issue.id);
       return rawToIssueRef(res.issueUpdate.issue);
     },
 
@@ -178,6 +182,7 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
     async archiveIssue(externalIssueRef: ExternalRef): Promise<void> {
       const client = await workspaceClient();
       await client.request(MUTATION_ISSUE_ARCHIVE, { id: externalIssueRef });
+      selfOriginationTracker.mark(externalIssueRef);
     },
 
     async postComment(args: PostCommentArgs): Promise<CommentRef> {
@@ -192,6 +197,7 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
       if (!res.commentCreate.success || !res.commentCreate.comment) {
         throw new Error("Linear commentCreate returned success=false");
       }
+      selfOriginationTracker.mark(res.commentCreate.comment.id);
       return {
         externalCommentRef: res.commentCreate.comment.id,
         createdAt: new Date(res.commentCreate.comment.createdAt),
@@ -207,6 +213,7 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
         id: externalCommentRef,
         input: { body },
       });
+      selfOriginationTracker.mark(externalCommentRef);
     },
 
     async deleteComment(
@@ -215,6 +222,7 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
     ): Promise<void> {
       const client = await clientForAuthor(by);
       await client.request(MUTATION_COMMENT_DELETE, { id: externalCommentRef });
+      selfOriginationTracker.mark(externalCommentRef);
     },
 
     async getComments(
@@ -281,6 +289,7 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
         id: externalIssueRef,
         input: { labelIds: externalLabelRefs },
       });
+      selfOriginationTracker.mark(externalIssueRef);
     },
 
     async uploadAttachment(
@@ -332,8 +341,8 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
       return { displayName: res.user.name, email: res.user.email };
     },
 
-    normalizeEvent(_raw: unknown): MessagingEvent | null {
-      throw new Error("LinearAdapter.normalizeEvent not implemented (Task 14)");
+    normalizeEvent(raw: unknown): MessagingEvent | null {
+      return normalizeLinearEvent(raw);
     },
   };
 }

@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, index, jsonb } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { authUsers } from "./auth.js";
 import { companySecrets } from "./company_secrets.js";
@@ -16,6 +16,12 @@ export const messagingWorkspaceInstall = pgTable(
     signingSecretId: uuid("signing_secret_id").notNull().references(() => companySecrets.id),
     installedByUserId: text("installed_by_user_id").references(() => authUsers.id),
     state: text("state").notNull().default("active"),
+    /**
+     * Backend-specific install metadata. For Linear: `{ linearTeamId,
+     * linearTeamKey, linearWorkflowStateMap }`. Nullable so fake-adapter
+     * installs (and existing rows) have no constraint.
+     */
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
     installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

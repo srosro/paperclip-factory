@@ -53,8 +53,9 @@ import { pluginRegistryService } from "./services/plugin-registry.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
-import { initMessaging } from "./messaging/index.js";
+import { defaultLinearResolvers, initMessaging } from "./messaging/index.js";
 import { handleMessageCreatedSideEffects } from "./messaging/side-effects.js";
+import { messagingLinearRoutes } from "./routes/messaging-linear.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -136,10 +137,14 @@ export async function createApp(
   const publicBaseUrl =
     process.env.PAPERCLIP_PUBLIC_BASE_URL ||
     `http://${opts.bindHost}:${process.env.PAPERCLIP_LISTEN_PORT ?? 3100}`;
+  const linearEnvConfigured = Boolean(
+    process.env.LINEAR_APP_CLIENT_ID && process.env.LINEAR_APP_CLIENT_SECRET,
+  );
   initMessaging({
     db,
     storage: opts.storageService,
     issueUrlBase: publicBaseUrl,
+    linear: linearEnvConfigured ? defaultLinearResolvers(db, opts.storageService) : undefined,
     // onMessageCreated is the single hook that inbound events fire after a
     // ref row is persisted. It feeds the unified side-effect pipeline so
     // inbound external-tracker comments wake assignees + mentioned agents.
@@ -216,6 +221,7 @@ export async function createApp(
   api.use(inboxDismissalRoutes(db));
   api.use(instanceSettingsRoutes(db));
   api.use(messagingAdminRoutes(db));
+  api.use("/messaging", messagingLinearRoutes(db));
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = createPluginWorkerManager();
   const pluginRegistry = pluginRegistryService(db);

@@ -1,0 +1,1 @@
+ALTER TABLE "messaging_workspace_install" ADD COLUMN "metadata" jsonb;

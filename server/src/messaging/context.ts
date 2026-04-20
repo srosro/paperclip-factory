@@ -9,10 +9,14 @@ import type { Db, IssueTrackerRouter } from "./router.js";
 import { createIssueTrackerRouter } from "./router.js";
 import type { EventsProcessor } from "./events.js";
 import { createEventsProcessor } from "./events.js";
-import type { BackendKey, IssueTrackerAdapter } from "./types.js";
+import type { BackendKey, IssueTrackerAdapter, MessagingEvent } from "./types.js";
 import { MessagingNotConfigured } from "./types.js";
 import type { StorageService } from "../storage/types.js";
 import { createFakeAdapter } from "./adapters/fake/adapter.js";
+import { createLinearAdapter } from "./adapters/linear/adapter.js";
+import { syncFromLinearEvent } from "./adapters/linear/cache-sync.js";
+import { resolveLinearMentions } from "./adapters/linear/mention-parser.js";
+import { selfOriginationTracker } from "./adapters/linear/self-origination.js";
 
 export interface OnMessageCreated {
   (args: {
@@ -26,11 +30,22 @@ export interface OnMessageCreated {
   }): Promise<void>;
 }
 
+export interface LinearResolvers {
+  getWorkspaceToken: (companyId: string) => Promise<string>;
+  getUserToken: (companyId: string, secretId: string) => Promise<string>;
+}
+
 export interface MessagingBootstrapDeps {
   db: Db;
   storage?: StorageService;
   issueUrlBase?: string;
   onMessageCreated?: OnMessageCreated;
+  /**
+   * Linear resolvers — wired when LINEAR_APP_CLIENT_ID / _SECRET are set in
+   * the environment. Undefined otherwise (company resolves to not_installed
+   * for backend=linear).
+   */
+  linear?: LinearResolvers;
   /**
    * Test-only fallback. When set, companies without a messaging_company_config
    * row are treated as if activeBackend = testFallbackBackend. Production
@@ -103,15 +118,34 @@ export async function resolveMessagingContext(
   let backend: BackendKey | null = null;
   if (cfg?.activeBackend === "fake") {
     backend = "fake";
+  } else if (cfg?.activeBackend === "linear") {
+    backend = "linear";
   } else if (deps.testFallbackBackend === "fake") {
     backend = "fake";
   }
-  // Any other active_backend (including historical 'slack') resolves
-  // to 'disabled' on this branch. Linear is wired in Plan B.
 
   if (!backend) return { status: "disabled", companyId };
 
-  // backend === 'fake'
+  if (backend === "linear") {
+    const [install] = await deps.db
+      .select()
+      .from(messagingWorkspaceInstall)
+      .where(
+        and(
+          eq(messagingWorkspaceInstall.companyId, companyId),
+          eq(messagingWorkspaceInstall.backend, "linear"),
+          eq(messagingWorkspaceInstall.state, "active"),
+        ),
+      )
+      .limit(1);
+    if (!install || !deps.linear) {
+      return { status: "not_installed", companyId, backend };
+    }
+    const ctx = buildLinearContext(deps, companyId, install);
+    contextCache.set(companyId, ctx);
+    return ctx;
+  }
+
   const ctx = buildFakeContext(deps, companyId);
   contextCache.set(companyId, ctx);
   return ctx;
@@ -154,7 +188,6 @@ function buildFakeContext(
     backend: "fake",
     onMessageCreated: bootstrap.onMessageCreated,
   });
-  // Wire FakeAdapter echo → events processor for this company's router.
   if (
     "onLocalEvent" in adapter &&
     typeof (adapter as { onLocalEvent?: unknown }).onLocalEvent === "function"
@@ -172,5 +205,52 @@ function buildFakeContext(
     adapter,
     router,
     events,
+  };
+}
+
+function buildLinearContext(
+  bootstrap: MessagingBootstrapDeps,
+  companyId: string,
+  install: MessagingWorkspaceInstallRow,
+): ReadyMessagingContext {
+  if (!bootstrap.linear) throw new Error("Linear resolvers not configured");
+  const adapter = createLinearAdapter({
+    getWorkspaceToken: bootstrap.linear.getWorkspaceToken,
+    getUserToken: bootstrap.linear.getUserToken,
+    companyId,
+  });
+  const router = createIssueTrackerRouter({
+    db: bootstrap.db,
+    adapter,
+    backend: "linear",
+    workspaceInstallId: install.id,
+    issueUrlBase: bootstrap.issueUrlBase,
+  });
+  const events = createEventsProcessor({
+    db: bootstrap.db,
+    backend: "linear",
+    workspaceInstallId: install.id,
+    onMessageCreated: bootstrap.onMessageCreated,
+    resolveMentions: (body) => resolveLinearMentions(bootstrap.db, companyId, body),
+    syncFromEvent: (event) =>
+      syncFromLinearEvent({ db: bootstrap.db, companyId }, event),
+    isSelfOriginated: (event: MessagingEvent) => {
+      const ref =
+        "externalCommentRef" in event && event.externalCommentRef
+          ? event.externalCommentRef
+          : "externalIssueRef" in event && event.externalIssueRef
+            ? event.externalIssueRef
+            : null;
+      return ref ? selfOriginationTracker.wasRecentlyMarked(ref) : false;
+    },
+  });
+  return {
+    status: "ready",
+    companyId,
+    backend: "linear",
+    adapter,
+    router,
+    events,
+    workspaceInstall: install,
   };
 }
