@@ -1133,12 +1133,9 @@ export function OnboardingWizard() {
                       disabled={!createdCompanyId}
                       onClick={() => {
                         if (!createdCompanyId) return;
-                        const returnUrl = encodeURIComponent(
-                          window.location.pathname +
-                            window.location.search +
-                            (window.location.search ? "&" : "?") +
-                            "onboarding=resume"
-                        );
+                        const cleanUrl = new URL(window.location.href);
+                        cleanUrl.searchParams.set("onboarding", "resume");
+                        const returnUrl = encodeURIComponent(cleanUrl.pathname + cleanUrl.search);
                         window.location.assign(
                           messagingApi.linearInstallUrl(createdCompanyId) +
                             `&returnUrl=${returnUrl}`

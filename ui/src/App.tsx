@@ -265,8 +265,7 @@ function OnboardingResumeHandler() {
       initialStep: 3,
       ...(selectedCompanyId ? { companyId: selectedCompanyId } : {}),
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [openOnboarding, selectedCompanyId]);
 
   return null;
 }

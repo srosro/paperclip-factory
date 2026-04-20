@@ -84,7 +84,7 @@ export function messagingLinearRoutes(db: Db): Router {
     const companyId = (req.query.companyId as string | undefined) ?? "";
     if (!companyId) throw badRequest("companyId query param required");
     assertCompanyAccess(req, companyId);
-    // Only accept relative return URLs to prevent open redirects.
+    // Only accept relative returnUrl to prevent open redirects; silently ignore absolute URLs.
     const rawReturnUrl = req.query.returnUrl as string | undefined;
     const returnUrl = rawReturnUrl?.startsWith("/") ? rawReturnUrl : undefined;
     const stateToken = mintStateToken(env.clientSecret, {
