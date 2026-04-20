@@ -52,4 +52,19 @@ describe("LinearRequiredGate", () => {
     expect(container.textContent).toContain("Connect a Linear workspace");
     await act(async () => { root.unmount(); });
   });
+
+  it("shows children when status query errors (fail-open)", async () => {
+    getStatusMock.mockRejectedValue(new Error("network error"));
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <TooltipProvider><LinearRequiredGate><span>my content</span></LinearRequiredGate></TooltipProvider>
+        </QueryClientProvider>
+      );
+    });
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    expect(container.textContent).toContain("my content");
+    await act(async () => { root.unmount(); });
+  });
 });

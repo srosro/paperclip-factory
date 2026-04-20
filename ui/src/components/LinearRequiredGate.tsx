@@ -20,7 +20,7 @@ export function LinearRequiredGate({ children }: LinearRequiredGateProps) {
     enabled: !!selectedCompanyId,
   });
 
-  if (!selectedCompanyId || statusQuery.isLoading) return <>{children}</>;
+  if (!selectedCompanyId || statusQuery.isLoading || statusQuery.isError) return <>{children}</>;
 
   const readiness = statusQuery.data?.readiness ?? "disabled";
 
