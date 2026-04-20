@@ -2100,12 +2100,8 @@ export function IssueDetail() {
     await interruptQueuedComment.mutateAsync(runId);
   }, [interruptQueuedComment]);
 
-  if (isLoading) return <IssueDetailLoadingState headerSeed={issueHeaderSeed} />;
-  if (error) return <p className="text-sm text-destructive">{error.message}</p>;
-  if (!issue) return null;
-
   // Ancestors are returned oldest-first from the server (root at end, immediate parent at start)
-  const ancestors = issue.ancestors ?? [];
+  const ancestors = issue?.ancestors ?? [];
   const handleFilePicked = async (evt: ChangeEvent<HTMLInputElement>) => {
     const files = evt.target.files;
     if (!files || files.length === 0) return;
@@ -2168,6 +2164,11 @@ export function IssueDetail() {
 
   return (
     <LinearRequiredGate>
+    {isLoading ? (
+      <IssueDetailLoadingState headerSeed={issueHeaderSeed} />
+    ) : error ? (
+      <p className="text-sm text-destructive">{error.message}</p>
+    ) : !issue ? null : (
     <div className="max-w-2xl space-y-6">
       {/* Parent chain breadcrumb */}
       {ancestors.length > 0 && (
@@ -2711,6 +2712,7 @@ export function IssueDetail() {
       </Sheet>
       <ScrollToBottom />
     </div>
+    )}
     </LinearRequiredGate>
   );
 }
