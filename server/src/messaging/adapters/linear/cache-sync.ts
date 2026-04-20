@@ -85,7 +85,7 @@ async function updateIssueFromEvent(
   if ("description" in event && event.description !== undefined) {
     patch.description = event.description;
   }
-  if ("priority" in event && event.priority != null && deps.workflowStateMap) {
+  if ("priority" in event && event.priority != null) {
     const mapped = mapLinearPriorityToPaperclip(event.priority as number);
     if (mapped !== null) patch.priority = mapped;
   }
