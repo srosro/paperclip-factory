@@ -199,3 +199,11 @@ export class MessagingThreadLocked extends Error {
     this.name = "MessagingThreadLocked";
   }
 }
+
+/**
+ * IssueTrackerAdapter is the target name for this interface post-refactor.
+ * During the refactor, it's an alias so callers can migrate incrementally.
+ * After the refactor completes (Task 10), MessagingAdapter is removed and
+ * only IssueTrackerAdapter remains, with the redesigned method surface.
+ */
+export type IssueTrackerAdapter = MessagingAdapter;
