@@ -57,6 +57,8 @@ export const issues = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
     hiddenAt: timestamp("hidden_at", { withTimezone: true }),
+    linearIssueId: uuid("linear_issue_id"),
+    linearIssueIdentifier: text("linear_issue_identifier"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -90,5 +92,8 @@ export const issues = pgTable(
           and ${table.executionRunId} is not null
           and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
       ),
+    linearIssueIdUnique: uniqueIndex("issues_linear_issue_id_idx")
+      .on(table.linearIssueId)
+      .where(sql`linear_issue_id IS NOT NULL`),
   }),
 );

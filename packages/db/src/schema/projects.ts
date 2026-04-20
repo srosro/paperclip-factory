@@ -1,4 +1,14 @@
-import { pgTable, uuid, text, timestamp, date, index, jsonb } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import {
+  pgTable,
+  uuid,
+  text,
+  timestamp,
+  date,
+  index,
+  jsonb,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 import type { AgentEnvConfig } from "@paperclipai/shared";
 import { companies } from "./companies.js";
 import { goals } from "./goals.js";
@@ -21,10 +31,14 @@ export const projects = pgTable(
     pausedAt: timestamp("paused_at", { withTimezone: true }),
     executionWorkspacePolicy: jsonb("execution_workspace_policy").$type<Record<string, unknown>>(),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
+    linearProjectId: uuid("linear_project_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     companyIdx: index("projects_company_idx").on(table.companyId),
+    linearProjectIdUnique: uniqueIndex("projects_linear_project_id_idx")
+      .on(table.linearProjectId)
+      .where(sql`linear_project_id IS NOT NULL`),
   }),
 );

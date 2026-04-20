@@ -428,6 +428,13 @@
       "when": 1776506089403,
       "tag": "0060_broad_viper",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1776666483761,
+      "tag": "0061_flat_namorita",
+      "breakpoints": true
     }
   ]
 }

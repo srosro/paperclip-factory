@@ -69,3 +69,5 @@ export { messagingIdentities } from "./messaging_identities.js";
 export { messagingMessageRefs } from "./messaging_message_refs.js";
 export { messagingEventsInbox } from "./messaging_events_inbox.js";
 export { messagingCompanyConfig } from "./messaging_company_config.js";
+export { issueCommentRefs } from "./issue_comment_refs.js";
+export { messagingLabelRefs } from "./messaging_label_refs.js";
