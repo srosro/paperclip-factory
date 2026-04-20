@@ -26,10 +26,8 @@ import {
   principalPermissionGrants,
   companyMemberships,
   companySkills,
-  messagingChannels,
+  issueCommentRefs,
   messagingIdentities,
-  messagingMessageRefs,
-  messagingThreads,
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 
@@ -270,24 +268,14 @@ export function companyService(db: Db) {
         await tx.delete(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, id));
         await tx.delete(agentApiKeys).where(eq(agentApiKeys.companyId, id));
         await tx.delete(agentRuntimeState).where(eq(agentRuntimeState.companyId, id));
-        // Messaging cascade: refs -> threads -> channels -> identities.
-        // messaging_message_refs has no companyId; chain via threads -> issues.
+        // Messaging cascade: issue_comment_refs chain via issues.companyId,
+        // then identities.
         await tx.execute(sql`
-          DELETE FROM ${messagingMessageRefs}
-          WHERE ${messagingMessageRefs.threadId} IN (
-            SELECT ${messagingThreads.id}
-            FROM ${messagingThreads}
-            JOIN ${issues} ON ${issues.id} = ${messagingThreads.issueId}
-            WHERE ${issues.companyId} = ${id}
-          )
-        `);
-        await tx.execute(sql`
-          DELETE FROM ${messagingThreads}
-          WHERE ${messagingThreads.issueId} IN (
+          DELETE FROM ${issueCommentRefs}
+          WHERE ${issueCommentRefs.issueId} IN (
             SELECT ${issues.id} FROM ${issues} WHERE ${issues.companyId} = ${id}
           )
         `);
-        await tx.delete(messagingChannels).where(eq(messagingChannels.companyId, id));
         await tx.delete(messagingIdentities).where(eq(messagingIdentities.companyId, id));
         await tx.delete(costEvents).where(eq(costEvents.companyId, id));
         await tx.delete(financeEvents).where(eq(financeEvents.companyId, id));

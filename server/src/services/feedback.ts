@@ -16,8 +16,7 @@ import {
   instanceSettings,
   issueDocuments,
   issues,
-  messagingMessageRefs,
-  messagingThreads,
+  issueCommentRefs,
 } from "@paperclipai/db";
 import { resolveMessagingContext } from "../messaging/index.js";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
@@ -797,18 +796,17 @@ async function resolveFeedbackTarget(
     // (#comment-<id>) is preserved so the UI keeps working unchanged.
     const targetRef = await db
       .select({
-        id: messagingMessageRefs.id,
-        issueId: messagingThreads.issueId,
+        id: issueCommentRefs.id,
+        issueId: issueCommentRefs.issueId,
         companyId: issues.companyId,
-        authorAgentId: messagingMessageRefs.authorAgentId,
-        authorUserId: messagingMessageRefs.authorUserId,
-        createdByRunId: messagingMessageRefs.createdByRunId,
-        createdAt: messagingMessageRefs.firstSeenAt,
+        authorAgentId: issueCommentRefs.authorAgentId,
+        authorUserId: issueCommentRefs.authorUserId,
+        createdByRunId: issueCommentRefs.createdByRunId,
+        createdAt: issueCommentRefs.firstSeenAt,
       })
-      .from(messagingMessageRefs)
-      .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-      .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
-      .where(eq(messagingMessageRefs.id, targetId))
+      .from(issueCommentRefs)
+      .innerJoin(issues, eq(issues.id, issueCommentRefs.issueId))
+      .where(eq(issueCommentRefs.id, targetId))
       .then((rows) => rows[0] ?? null);
 
     if (!targetRef || targetRef.issueId !== issue.id || targetRef.companyId !== issue.companyId) {
@@ -822,7 +820,7 @@ async function resolveFeedbackTarget(
     let body = "";
     const ctx = await resolveMessagingContext(issue.companyId);
     if (ctx.status === "ready") {
-      const messages = await ctx.router.getThreadMessages({ issueId: issue.id });
+      const messages = await ctx.router.getComments({ issueId: issue.id });
       body = messages.find((m) => m.refId === targetRef.id)?.body ?? "";
     }
 
@@ -929,21 +927,20 @@ async function listIssueContextItems(
   const commentBodyByRef = new Map<string, string>();
   const ctx = await resolveMessagingContext(issue.companyId);
   if (ctx.status === "ready") {
-    const msgs = await ctx.router.getThreadMessages({ issueId: issue.id });
+    const msgs = await ctx.router.getComments({ issueId: issue.id });
     for (const m of msgs) commentBodyByRef.set(m.refId, m.body);
   }
   const [commentRefs, revisionRows] = await Promise.all([
     db
       .select({
-        targetId: messagingMessageRefs.id,
-        createdAt: messagingMessageRefs.firstSeenAt,
-        authorAgentId: messagingMessageRefs.authorAgentId,
-        authorUserId: messagingMessageRefs.authorUserId,
-        createdByRunId: messagingMessageRefs.createdByRunId,
+        targetId: issueCommentRefs.id,
+        createdAt: issueCommentRefs.firstSeenAt,
+        authorAgentId: issueCommentRefs.authorAgentId,
+        authorUserId: issueCommentRefs.authorUserId,
+        createdByRunId: issueCommentRefs.createdByRunId,
       })
-      .from(messagingMessageRefs)
-      .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-      .where(eq(messagingThreads.issueId, issue.id)),
+      .from(issueCommentRefs)
+      .where(eq(issueCommentRefs.issueId, issue.id)),
     db
       .select({
         targetId: documentRevisions.id,

@@ -14,8 +14,7 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issues,
-  messagingMessageRefs,
-  messagingThreads,
+  issueCommentRefs,
   projects,
   projectWorkspaces,
 } from "@paperclipai/db";
@@ -193,7 +192,7 @@ async function resolveRunScopedMentionedSkillKeys(input: {
   const ctxForSkills = await resolveMessagingContext(input.companyId);
   const commentBodies =
     ctxForSkills.status === "ready"
-      ? (await ctxForSkills.router.getThreadMessages({ issueId })).map((m) => m.body)
+      ? (await ctxForSkills.router.getComments({ issueId })).map((m) => m.body)
       : [];
   const mentionedSkillIds = extractMentionedSkillIdsFromSources([
     issue.title,
@@ -1250,19 +1249,18 @@ async function buildPaperclipWakePayload(input: {
       ? []
       : await input.db
           .select({
-            id: messagingMessageRefs.id,
-            issueId: messagingThreads.issueId,
-            authorAgentId: messagingMessageRefs.authorAgentId,
-            authorUserId: messagingMessageRefs.authorUserId,
-            createdAt: messagingMessageRefs.firstSeenAt,
+            id: issueCommentRefs.id,
+            issueId: issueCommentRefs.issueId,
+            authorAgentId: issueCommentRefs.authorAgentId,
+            authorUserId: issueCommentRefs.authorUserId,
+            createdAt: issueCommentRefs.firstSeenAt,
           })
-          .from(messagingMessageRefs)
-          .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-          .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
+          .from(issueCommentRefs)
+          .innerJoin(issues, eq(issues.id, issueCommentRefs.issueId))
           .where(
             and(
               eq(issues.companyId, input.companyId),
-              inArray(messagingMessageRefs.id, commentIds),
+              inArray(issueCommentRefs.id, commentIds),
             ),
           );
 
@@ -1272,8 +1270,8 @@ async function buildPaperclipWakePayload(input: {
     if (bodyCtx.status === "ready") {
       const uniqueIssueIds = [...new Set(commentRefs.map((r) => r.issueId))];
       for (const issueIdForBody of uniqueIssueIds) {
-        const msgs = await bodyCtx.router.getThreadMessages({ issueId: issueIdForBody });
-        const byRef = new Map(msgs.map((m) => [m.refId, m.body]));
+        const msgs = await bodyCtx.router.getComments({ issueId: issueIdForBody });
+        const byRef = new Map<string, string>(msgs.map((m) => [m.refId, m.body]));
         bodyByIssue.set(issueIdForBody, byRef);
       }
     }
@@ -2314,22 +2312,20 @@ export function heartbeatService(db: Db) {
   }
 
   async function findRunIssueComment(runId: string, companyId: string, issueId: string) {
-    // companyId is implicit via thread -> issue; we still filter issueId + runId.
     return db
       .select({
-        id: messagingMessageRefs.id,
+        id: issueCommentRefs.id,
       })
-      .from(messagingMessageRefs)
-      .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-      .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
+      .from(issueCommentRefs)
+      .innerJoin(issues, eq(issues.id, issueCommentRefs.issueId))
       .where(
         and(
           eq(issues.companyId, companyId),
-          eq(messagingThreads.issueId, issueId),
-          eq(messagingMessageRefs.createdByRunId, runId),
+          eq(issueCommentRefs.issueId, issueId),
+          eq(issueCommentRefs.createdByRunId, runId),
         ),
       )
-      .orderBy(desc(messagingMessageRefs.firstSeenAt), desc(messagingMessageRefs.id))
+      .orderBy(desc(issueCommentRefs.firstSeenAt), desc(issueCommentRefs.id))
       .limit(1)
       .then((rows) => rows[0] ?? null);
   }

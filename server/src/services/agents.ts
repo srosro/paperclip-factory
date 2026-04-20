@@ -15,7 +15,7 @@ import {
   issueExecutionDecisions,
   issues,
   messagingIdentities,
-  messagingMessageRefs,
+  issueCommentRefs,
 } from "@paperclipai/db";
 import { isUuidLike, normalizeAgentUrlKey } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -492,12 +492,12 @@ export function agentService(db: Db) {
           ),
         );
         await tx.delete(issueExecutionDecisions).where(eq(issueExecutionDecisions.actorAgentId, id));
-        // Null out author on any messaging refs by this agent; preserve the
-        // message history itself so threads remain intact.
+        // Null out author on any comment refs by this agent; the comment
+        // history itself lives in the external tracker and is preserved.
         await tx
-          .update(messagingMessageRefs)
+          .update(issueCommentRefs)
           .set({ authorAgentId: null })
-          .where(eq(messagingMessageRefs.authorAgentId, id));
+          .where(eq(issueCommentRefs.authorAgentId, id));
         await tx.delete(messagingIdentities).where(eq(messagingIdentities.agentId, id));
         await tx.delete(heartbeatRuns).where(eq(heartbeatRuns.agentId, id));
         await tx.delete(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, id));

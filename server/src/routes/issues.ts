@@ -2680,30 +2680,9 @@ export function issueRoutes(
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
     });
 
-    // If this attachment is linked to an existing messaging ref and the
-    // configured backend supports file upload, ship the bytes to the same
-    // thread so the file renders in-line. Best effort: surface but don't
-    // fail the HTTP request on Slack errors.
-    if (parsedMeta.data.issueCommentId) {
-      const msgCtx = await resolveMessagingContext(companyId);
-      if (msgCtx.status === "ready") {
-        try {
-          await msgCtx.router.uploadAttachmentToMessage({
-            refId: parsedMeta.data.issueCommentId,
-            authorAgentId: actor.agentId ?? undefined,
-            authorUserId: actor.actorType === "user" ? actor.actorId : undefined,
-            filename: attachment.originalFilename ?? `attachment-${attachment.id}`,
-            contentType: attachment.contentType,
-            body: file.buffer,
-          });
-        } catch (err) {
-          logger.warn(
-            { err, issueId, attachmentId: attachment.id },
-            "messaging: upload attachment to backend thread failed",
-          );
-        }
-      }
-    }
+    // TODO(plan-b): upload attachments to the external tracker via
+    // router.uploadAttachment() once Plan B restores file-upload support
+    // on the IssueTrackerAdapter.
 
     await logActivity(db, {
       companyId,

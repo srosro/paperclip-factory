@@ -18,8 +18,7 @@ import {
   issueReadStates,
   issues,
   labels,
-  messagingMessageRefs,
-  messagingThreads,
+  issueCommentRefs,
   projectWorkspaces,
   projects,
 } from "@paperclipai/db";
@@ -193,12 +192,10 @@ function touchedByUserCondition(companyId: string, userId: string) {
       )
       OR EXISTS (
         SELECT 1
-        FROM ${messagingMessageRefs}
-        JOIN ${messagingThreads}
-          ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
-        WHERE ${messagingThreads.issueId} = ${issues.id}
-          AND ${messagingMessageRefs.authorUserId} = ${userId}
-          AND ${messagingMessageRefs.deletedAt} IS NULL
+        FROM ${issueCommentRefs}
+        WHERE ${issueCommentRefs.issueId} = ${issues.id}
+          AND ${issueCommentRefs.authorUserId} = ${userId}
+          AND ${issueCommentRefs.deletedAt} IS NULL
       )
     )
   `;
@@ -211,12 +208,10 @@ function participatedByAgentCondition(companyId: string, agentId: string) {
       OR ${issues.assigneeAgentId} = ${agentId}
       OR EXISTS (
         SELECT 1
-        FROM ${messagingMessageRefs}
-        JOIN ${messagingThreads}
-          ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
-        WHERE ${messagingThreads.issueId} = ${issues.id}
-          AND ${messagingMessageRefs.authorAgentId} = ${agentId}
-          AND ${messagingMessageRefs.deletedAt} IS NULL
+        FROM ${issueCommentRefs}
+        WHERE ${issueCommentRefs.issueId} = ${issues.id}
+          AND ${issueCommentRefs.authorAgentId} = ${agentId}
+          AND ${issueCommentRefs.deletedAt} IS NULL
       )
       OR EXISTS (
         SELECT 1
@@ -235,13 +230,11 @@ function myLastCommentAtExpr(companyId: string, userId: string) {
   void companyId;
   return sql<Date | null>`
     (
-      SELECT MAX(${messagingMessageRefs.firstSeenAt})
-      FROM ${messagingMessageRefs}
-      JOIN ${messagingThreads}
-        ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
-      WHERE ${messagingThreads.issueId} = ${issues.id}
-        AND ${messagingMessageRefs.authorUserId} = ${userId}
-        AND ${messagingMessageRefs.deletedAt} IS NULL
+      SELECT MAX(${issueCommentRefs.firstSeenAt})
+      FROM ${issueCommentRefs}
+      WHERE ${issueCommentRefs.issueId} = ${issues.id}
+        AND ${issueCommentRefs.authorUserId} = ${userId}
+        AND ${issueCommentRefs.deletedAt} IS NULL
     )
   `;
 }
@@ -275,15 +268,13 @@ function lastExternalCommentAtExpr(companyId: string, userId: string) {
   void companyId;
   return sql<Date | null>`
     (
-      SELECT MAX(${messagingMessageRefs.firstSeenAt})
-      FROM ${messagingMessageRefs}
-      JOIN ${messagingThreads}
-        ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
-      WHERE ${messagingThreads.issueId} = ${issues.id}
-        AND ${messagingMessageRefs.deletedAt} IS NULL
+      SELECT MAX(${issueCommentRefs.firstSeenAt})
+      FROM ${issueCommentRefs}
+      WHERE ${issueCommentRefs.issueId} = ${issues.id}
+        AND ${issueCommentRefs.deletedAt} IS NULL
         AND (
-          ${messagingMessageRefs.authorUserId} IS NULL
-          OR ${messagingMessageRefs.authorUserId} <> ${userId}
+          ${issueCommentRefs.authorUserId} IS NULL
+          OR ${issueCommentRefs.authorUserId} <> ${userId}
         )
     )
   `;
@@ -315,12 +306,10 @@ function issueLatestCommentAtExpr(companyId: string) {
   void companyId;
   return sql<Date | null>`
     (
-      SELECT MAX(${messagingMessageRefs.firstSeenAt})
-      FROM ${messagingMessageRefs}
-      JOIN ${messagingThreads}
-        ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
-      WHERE ${messagingThreads.issueId} = ${issues.id}
-        AND ${messagingMessageRefs.deletedAt} IS NULL
+      SELECT MAX(${issueCommentRefs.firstSeenAt})
+      FROM ${issueCommentRefs}
+      WHERE ${issueCommentRefs.issueId} = ${issues.id}
+        AND ${issueCommentRefs.deletedAt} IS NULL
     )
   `;
 }
@@ -361,16 +350,14 @@ function unreadForUserCondition(companyId: string, userId: string) {
       ${touchedCondition}
       AND EXISTS (
         SELECT 1
-        FROM ${messagingMessageRefs}
-        JOIN ${messagingThreads}
-          ON ${messagingThreads.id} = ${messagingMessageRefs.threadId}
-        WHERE ${messagingThreads.issueId} = ${issues.id}
-          AND ${messagingMessageRefs.deletedAt} IS NULL
+        FROM ${issueCommentRefs}
+        WHERE ${issueCommentRefs.issueId} = ${issues.id}
+          AND ${issueCommentRefs.deletedAt} IS NULL
           AND (
-            ${messagingMessageRefs.authorUserId} IS NULL
-            OR ${messagingMessageRefs.authorUserId} <> ${userId}
+            ${issueCommentRefs.authorUserId} IS NULL
+            OR ${issueCommentRefs.authorUserId} <> ${userId}
           )
-          AND ${messagingMessageRefs.firstSeenAt} > ${myLastTouchAt}
+          AND ${issueCommentRefs.firstSeenAt} > ${myLastTouchAt}
       )
     )
   `;
@@ -590,6 +577,8 @@ const issueListSelect = {
   completedAt: issues.completedAt,
   cancelledAt: issues.cancelledAt,
   hiddenAt: issues.hiddenAt,
+  linearIssueId: issues.linearIssueId,
+  linearIssueIdentifier: issues.linearIssueIdentifier,
   createdAt: issues.createdAt,
   updatedAt: issues.updatedAt,
 };
@@ -1092,28 +1081,27 @@ export function issueService(db: Db) {
         contextUserId
           ? db
             .select({
-              issueId: messagingThreads.issueId,
+              issueId: issueCommentRefs.issueId,
               myLastCommentAt: sql<Date | null>`
-                MAX(CASE WHEN ${messagingMessageRefs.authorUserId} = ${contextUserId} THEN ${messagingMessageRefs.firstSeenAt} END)
+                MAX(CASE WHEN ${issueCommentRefs.authorUserId} = ${contextUserId} THEN ${issueCommentRefs.firstSeenAt} END)
               `,
               lastExternalCommentAt: sql<Date | null>`
                 MAX(
                   CASE
-                    WHEN ${messagingMessageRefs.authorUserId} IS NULL OR ${messagingMessageRefs.authorUserId} <> ${contextUserId}
-                    THEN ${messagingMessageRefs.firstSeenAt}
+                    WHEN ${issueCommentRefs.authorUserId} IS NULL OR ${issueCommentRefs.authorUserId} <> ${contextUserId}
+                    THEN ${issueCommentRefs.firstSeenAt}
                   END
                 )
               `,
             })
-            .from(messagingMessageRefs)
-            .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+            .from(issueCommentRefs)
             .where(
               and(
-                isNull(messagingMessageRefs.deletedAt),
-                inArray(messagingThreads.issueId, issueIds),
+                isNull(issueCommentRefs.deletedAt),
+                inArray(issueCommentRefs.issueId, issueIds),
               ),
             )
-            .groupBy(messagingThreads.issueId)
+            .groupBy(issueCommentRefs.issueId)
           : Promise.resolve([]),
         contextUserId
           ? db
@@ -1133,18 +1121,17 @@ export function issueService(db: Db) {
         Promise.all([
           db
             .select({
-              issueId: messagingThreads.issueId,
-              latestCommentAt: sql<Date | null>`MAX(${messagingMessageRefs.firstSeenAt})`,
+              issueId: issueCommentRefs.issueId,
+              latestCommentAt: sql<Date | null>`MAX(${issueCommentRefs.firstSeenAt})`,
             })
-            .from(messagingMessageRefs)
-            .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
+            .from(issueCommentRefs)
             .where(
               and(
-                isNull(messagingMessageRefs.deletedAt),
-                inArray(messagingThreads.issueId, issueIds),
+                isNull(issueCommentRefs.deletedAt),
+                inArray(issueCommentRefs.issueId, issueIds),
               ),
             )
-            .groupBy(messagingThreads.issueId),
+            .groupBy(issueCommentRefs.issueId),
           db
             .select({
               issueId: activityLog.entityId,
@@ -1766,28 +1753,9 @@ export function issueService(db: Db) {
       // messaging backend so the thread header stays in sync. Best-effort;
       // failures are logged inside the router. Skip when the company has no
       // active messaging backend.
-      if (result) {
-        const ctx = await resolveMessagingContext(result.companyId);
-        if (ctx.status === "ready") {
-          const touched =
-            issueData.status !== undefined ||
-            issueData.title !== undefined ||
-            issueData.assigneeAgentId !== undefined ||
-            issueData.assigneeUserId !== undefined ||
-            issueData.priority !== undefined;
-          if (touched) {
-            void ctx.router.onIssueStateChange(result.id);
-          }
-
-          // Soft-lock the messaging thread when an issue reaches a terminal
-          // state, unlock when it re-opens. Fire-and-forget — lock failures
-          // shouldn't block the status update.
-          if (issueData.status !== undefined && issueData.status !== existing.status) {
-            const terminal = result.status === "done" || result.status === "cancelled";
-            void ctx.router.setThreadLocked(result.id, terminal);
-          }
-        }
-      }
+      // Issue state changes flow to the external tracker via router.updateIssue
+      // in Plan B's cache-sync layer. Plan A does not round-trip status
+      // changes to the tracker (FakeAdapter has no persistent issue cache).
 
       return result;
     },
@@ -2145,7 +2113,7 @@ export function issueService(db: Db) {
       // merging ref rows with live adapter bodies.
       const ctx = await resolveMessagingContext(issue.companyId);
       if (ctx.status !== "ready") return [];
-      const messages = await ctx.router.getThreadMessages({ issueId });
+      const messages = await ctx.router.getComments({ issueId });
 
       let filtered = messages;
       if (afterCommentId) {
@@ -2183,7 +2151,7 @@ export function issueService(db: Db) {
       if (ctx.status !== "ready") {
         return { totalComments: 0, latestCommentId: null, latestCommentAt: null };
       }
-      const messages = await ctx.router.getThreadMessages({ issueId });
+      const messages = await ctx.router.getComments({ issueId });
       if (messages.length === 0) {
         return { totalComments: 0, latestCommentId: null, latestCommentAt: null };
       }
@@ -2198,26 +2166,25 @@ export function issueService(db: Db) {
     getComment: async (commentId: string) => {
       const [refRow] = await db
         .select({
-          id: messagingMessageRefs.id,
-          issueId: messagingThreads.issueId,
+          id: issueCommentRefs.id,
+          issueId: issueCommentRefs.issueId,
           companyId: issues.companyId,
-          authorAgentId: messagingMessageRefs.authorAgentId,
-          authorUserId: messagingMessageRefs.authorUserId,
-          createdByRunId: messagingMessageRefs.createdByRunId,
-          createdAt: messagingMessageRefs.firstSeenAt,
-          editedAt: messagingMessageRefs.editedAt,
+          authorAgentId: issueCommentRefs.authorAgentId,
+          authorUserId: issueCommentRefs.authorUserId,
+          createdByRunId: issueCommentRefs.createdByRunId,
+          createdAt: issueCommentRefs.firstSeenAt,
+          editedAt: issueCommentRefs.editedAt,
         })
-        .from(messagingMessageRefs)
-        .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-        .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
-        .where(eq(messagingMessageRefs.id, commentId))
+        .from(issueCommentRefs)
+        .innerJoin(issues, eq(issues.id, issueCommentRefs.issueId))
+        .where(eq(issueCommentRefs.id, commentId))
         .limit(1);
       if (!refRow) return null;
 
       let body = "";
       const readCtx = await resolveMessagingContext(refRow.companyId);
       if (readCtx.status === "ready") {
-        const msgs = await readCtx.router.getThreadMessages({ issueId: refRow.issueId });
+        const msgs = await readCtx.router.getComments({ issueId: refRow.issueId });
         body = msgs.find((m) => m.refId === refRow.id)?.body ?? "";
       }
       const { censorUsernameInLogs } = await instanceSettings.getGeneral();
@@ -2242,42 +2209,40 @@ export function issueService(db: Db) {
       // Look up first so we can return the same legacy shape the callers expect.
       const [refRow] = await db
         .select({
-          id: messagingMessageRefs.id,
-          issueId: messagingThreads.issueId,
+          id: issueCommentRefs.id,
+          issueId: issueCommentRefs.issueId,
           companyId: issues.companyId,
-          authorAgentId: messagingMessageRefs.authorAgentId,
-          authorUserId: messagingMessageRefs.authorUserId,
-          createdByRunId: messagingMessageRefs.createdByRunId,
-          createdAt: messagingMessageRefs.firstSeenAt,
-          editedAt: messagingMessageRefs.editedAt,
+          authorAgentId: issueCommentRefs.authorAgentId,
+          authorUserId: issueCommentRefs.authorUserId,
+          createdByRunId: issueCommentRefs.createdByRunId,
+          createdAt: issueCommentRefs.firstSeenAt,
+          editedAt: issueCommentRefs.editedAt,
         })
-        .from(messagingMessageRefs)
-        .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-        .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
-        .where(eq(messagingMessageRefs.id, commentId))
+        .from(issueCommentRefs)
+        .innerJoin(issues, eq(issues.id, issueCommentRefs.issueId))
+        .where(eq(issueCommentRefs.id, commentId))
         .limit(1);
       if (!refRow) return null;
 
       let body = "";
       const rmCtx = await resolveMessagingContext(refRow.companyId);
       if (rmCtx.status === "ready") {
-        const msgs = await rmCtx.router.getThreadMessages({ issueId: refRow.issueId });
+        const msgs = await rmCtx.router.getComments({ issueId: refRow.issueId });
         body = msgs.find((m) => m.refId === refRow.id)?.body ?? "";
       }
 
-      // Cancel = suppress, not delete. Slack owns the message body; we
-      // leave the Slack thread intact so humans see what was posted and
-      // only flip suppressedForWake so Paperclip side effects (agent
-      // wakes, inbox DMs, run-linked comment satisfaction) are skipped.
-      // Metadata records the cancellation for the diagnose endpoint.
+      // Cancel = suppress, not delete. The external tracker owns the
+      // comment body; flipping suppressedForWake skips Paperclip side
+      // effects (agent wakes, run-linked comment satisfaction) without
+      // removing the comment from the tracker.
       await db.transaction(async (tx) => {
         await tx
-          .update(messagingMessageRefs)
+          .update(issueCommentRefs)
           .set({
             suppressedForWake: true,
-            metadata: sql`COALESCE(${messagingMessageRefs.metadata}, '{}'::jsonb) || jsonb_build_object('cancelledAt', ${new Date().toISOString()}::text)`,
+            metadata: sql`COALESCE(${issueCommentRefs.metadata}, '{}'::jsonb) || jsonb_build_object('cancelledAt', ${new Date().toISOString()}::text)`,
           })
-          .where(eq(messagingMessageRefs.id, commentId));
+          .where(eq(issueCommentRefs.id, commentId));
         await tx
           .update(issues)
           .set({ updatedAt: new Date() })
@@ -2316,10 +2281,9 @@ export function issueService(db: Db) {
       const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
 
       const ctx = await requireMessagingContext(issue.companyId);
-      const posted = await ctx.router.postMessage({
+      const posted = await ctx.router.postComment({
         companyId: issue.companyId,
         issueId,
-        projectId: issue.projectId ?? null,
         authorAgentId: actor.agentId,
         authorUserId: actor.userId,
         body: redactedBody,
@@ -2366,19 +2330,17 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!issue) throw notFound("Issue not found");
 
-      // input.issueCommentId is the legacy field name the callers pass; it
-      // now refers to a messaging_message_refs.id.
+      // input.issueCommentId refers to an issue_comment_refs.id.
       if (input.issueCommentId) {
         const [refRow] = await db
           .select({
-            id: messagingMessageRefs.id,
-            issueId: messagingThreads.issueId,
+            id: issueCommentRefs.id,
+            issueId: issueCommentRefs.issueId,
             companyId: issues.companyId,
           })
-          .from(messagingMessageRefs)
-          .innerJoin(messagingThreads, eq(messagingThreads.id, messagingMessageRefs.threadId))
-          .innerJoin(issues, eq(issues.id, messagingThreads.issueId))
-          .where(eq(messagingMessageRefs.id, input.issueCommentId))
+          .from(issueCommentRefs)
+          .innerJoin(issues, eq(issues.id, issueCommentRefs.issueId))
+          .where(eq(issueCommentRefs.id, input.issueCommentId))
           .limit(1);
         if (!refRow) throw notFound("Issue comment not found");
         if (refRow.companyId !== issue.companyId || refRow.issueId !== issue.id) {
@@ -2558,7 +2520,7 @@ export function issueService(db: Db) {
       if (opts?.includeCommentBodies !== false) {
         const ctx = await resolveMessagingContext(issue.companyId);
         if (ctx.status === "ready") {
-          const messages = await ctx.router.getThreadMessages({ issueId });
+          const messages = await ctx.router.getComments({ issueId });
           for (const message of messages) {
             for (const projectId of extractProjectMentionIds(message.body)) {
               mentionedIds.add(projectId);

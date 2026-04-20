@@ -23,7 +23,6 @@ export interface OnMessageCreated {
     authorUserId: string | null;
     authorExternalRef: string;
     mentionedAgentIds: string[];
-    mentionedUserIds: string[];
   }): Promise<void>;
 }
 

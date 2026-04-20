@@ -2,12 +2,10 @@ import { Router, type Request, type Response } from "express";
 import { and, desc, eq } from "drizzle-orm";
 import {
   agents as agentsTable,
+  issueCommentRefs,
   issues as issuesTable,
-  messagingChannels,
   messagingCompanyConfig,
   messagingIdentities,
-  messagingMessageRefs,
-  messagingThreads,
   messagingWorkspaceInstall,
   type Db,
 } from "@paperclipai/db";
@@ -37,7 +35,7 @@ export interface MessagingStatusResponse {
   agentIdentities: MessagingAgentIdentityStatus[];
 }
 
-const BACKEND = "slack" as const;
+const BACKEND = "linear" as const;
 
 function normalizeIdentityState(
   state: string | null | undefined,
@@ -139,16 +137,21 @@ export function messagingAdminRoutes(db: Db): Router {
       const issueId = req.params.issueId as string;
 
       const [issue] = await db
-        .select({ id: issuesTable.id, companyId: issuesTable.companyId })
+        .select({
+          id: issuesTable.id,
+          companyId: issuesTable.companyId,
+          identifier: issuesTable.identifier,
+          title: issuesTable.title,
+          status: issuesTable.status,
+          linearIssueId: issuesTable.linearIssueId,
+          linearIssueIdentifier: issuesTable.linearIssueIdentifier,
+        })
         .from(issuesTable)
         .where(eq(issuesTable.id, issueId))
         .limit(1);
       if (!issue) throw notFound("Issue not found");
       assertCompanyAccess(req, issue.companyId);
 
-      // Resolve the company's messaging context so operators can see what
-      // the runtime would pick for this issue's company — disabled,
-      // not_installed, or ready (with backend + workspace id).
       const ctx = await resolveMessagingContext(issue.companyId);
       const contextOut =
         ctx.status === "ready"
@@ -163,64 +166,26 @@ export function messagingAdminRoutes(db: Db): Router {
             ? { status: ctx.status, backend: ctx.backend }
             : { status: ctx.status };
 
-      const [thread] = await db
+      const recentCommentsRaw = await db
         .select({
-          id: messagingThreads.id,
-          issueId: messagingThreads.issueId,
-          channelId: messagingThreads.channelId,
-          backend: messagingThreads.backend,
-          externalThreadRef: messagingThreads.externalThreadRef,
-          parentMessageRef: messagingThreads.parentMessageRef,
-          state: messagingThreads.state,
-          createdAt: messagingThreads.createdAt,
+          id: issueCommentRefs.id,
+          externalMessageRef: issueCommentRefs.externalMessageRef,
+          authorAgentId: issueCommentRefs.authorAgentId,
+          authorUserId: issueCommentRefs.authorUserId,
+          createdByRunId: issueCommentRefs.createdByRunId,
+          firstSeenAt: issueCommentRefs.firstSeenAt,
+          editedAt: issueCommentRefs.editedAt,
+          editCount: issueCommentRefs.editCount,
+          deletedAt: issueCommentRefs.deletedAt,
+          suppressedForWake: issueCommentRefs.suppressedForWake,
+          metadata: issueCommentRefs.metadata,
         })
-        .from(messagingThreads)
-        .where(eq(messagingThreads.issueId, issueId))
-        .limit(1);
-
-      if (!thread) {
-        res.json({
-          context: contextOut,
-          thread: null,
-          channel: null,
-          recentMessages: [],
-        });
-        return;
-      }
-
-      const [channel] = await db
-        .select({
-          id: messagingChannels.id,
-          workspaceInstallId: messagingChannels.workspaceInstallId,
-          externalChannelRef: messagingChannels.externalChannelRef,
-          externalChannelName: messagingChannels.externalChannelName,
-          purpose: messagingChannels.purpose,
-          state: messagingChannels.state,
-        })
-        .from(messagingChannels)
-        .where(eq(messagingChannels.id, thread.channelId))
-        .limit(1);
-
-      const recentMessagesRaw = await db
-        .select({
-          id: messagingMessageRefs.id,
-          externalMessageRef: messagingMessageRefs.externalMessageRef,
-          authorAgentId: messagingMessageRefs.authorAgentId,
-          authorUserId: messagingMessageRefs.authorUserId,
-          createdByRunId: messagingMessageRefs.createdByRunId,
-          firstSeenAt: messagingMessageRefs.firstSeenAt,
-          editedAt: messagingMessageRefs.editedAt,
-          editCount: messagingMessageRefs.editCount,
-          deletedAt: messagingMessageRefs.deletedAt,
-          suppressedForWake: messagingMessageRefs.suppressedForWake,
-          metadata: messagingMessageRefs.metadata,
-        })
-        .from(messagingMessageRefs)
-        .where(eq(messagingMessageRefs.threadId, thread.id))
-        .orderBy(desc(messagingMessageRefs.firstSeenAt))
+        .from(issueCommentRefs)
+        .where(eq(issueCommentRefs.issueId, issue.id))
+        .orderBy(desc(issueCommentRefs.firstSeenAt))
         .limit(10);
 
-      const recentMessages = recentMessagesRaw.map((row) => {
+      const recentComments = recentCommentsRaw.map((row) => {
         const metadata = (row.metadata ?? {}) as Record<string, unknown>;
         const sideEffectsDispatchedAt =
           typeof metadata.sideEffectsDispatchedAt === "string"
@@ -246,9 +211,15 @@ export function messagingAdminRoutes(db: Db): Router {
 
       res.json({
         context: contextOut,
-        thread,
-        channel: channel ?? null,
-        recentMessages,
+        issue: {
+          id: issue.id,
+          identifier: issue.identifier,
+          title: issue.title,
+          status: issue.status,
+          linearIssueId: issue.linearIssueId,
+          linearIssueIdentifier: issue.linearIssueIdentifier,
+        },
+        recentComments,
       });
     },
   );

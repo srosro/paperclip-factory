@@ -1,90 +1,71 @@
-import { eq, and, gt } from "drizzle-orm";
+import { and, eq, gt } from "drizzle-orm";
 import type {
-  BackendKey,
-  AuthorIdentity,
-  AdapterCredential,
   AttachmentRef,
-  MessagingAdapter,
+  AuthorIdentity,
+  AuthorKind,
+  BackendKey,
+  ExternalRef,
+  IssueTrackerAdapter,
 } from "./types.js";
-import { MessagingIdentityNotActive, MessagingThreadLocked } from "./types.js";
-import { fallbackCardText, type IssueCardInput } from "./issue-card.js";
+import { MessagingIdentityNotActive } from "./types.js";
 import type { createDb } from "@paperclipai/db";
 import {
-  messagingChannels,
-  messagingThreads,
-  messagingIdentities,
-  messagingMessageRefs,
   issues as issuesTable,
-  projects as projectsTable,
+  issueCommentRefs,
+  messagingIdentities,
 } from "@paperclipai/db";
 
 export type Db = ReturnType<typeof createDb>;
 
 export interface RouterDeps {
   db: Db;
-  /**
-   * The adapter instance this router routes through. Callers resolve one via
-   * resolveMessagingContext(companyId) so the adapter is workspace-scoped.
-   */
-  adapter: MessagingAdapter;
+  adapter: IssueTrackerAdapter;
   backend: BackendKey;
-  /**
-   * Workspace install this router is scoped to. Required for the Slack backend
-   * so channel/identity rows record the correct workspace linkage; null for
-   * the fake adapter (tests/dev).
-   */
   workspaceInstallId?: string | null;
-  channelNamePrefix?: string;
-  /**
-   * Optional — public-facing base URL for issue links embedded in thread cards.
-   * Example: "https://paperclip.local".
-   */
   issueUrlBase?: string;
 }
 
-export type AuthorKind = "agent" | "user" | "bot_system";
-
-export interface RouterPostArgs {
+export interface RouterPostCommentArgs {
   companyId: string;
   issueId: string;
-  /**
-   * Project the issue belongs to. When null, the router provisions an
-   * ad-hoc channel keyed on the issueId so comments still have a home.
-   */
-  projectId: string | null;
   authorAgentId?: string;
   authorUserId?: string;
-  /**
-   * Explicit principal kind. Defaults to "agent" when authorAgentId is
-   * present, "user" when authorUserId is present, else "bot_system"
-   * (Paperclip-authored: recovery/status comments, thread-locked replies,
-   * other server-generated posts). Slack posts for bot_system authoring
-   * use the workspace bot token.
-   */
   authorKind?: AuthorKind;
   body: string;
   createdByRunId?: string;
-  blocks?: unknown;
-  /**
-   * Optional: Paperclip attachments to upload into the Slack thread after
-   * the comment posts. Requires the configured adapter to advertise
-   * `supportsFileUpload`; otherwise the adapter ignores them.
-   */
   attachments?: AttachmentRef[];
 }
 
-export interface UploadAttachmentArgs {
-  refId: string;
+export interface RouterCreateIssueArgs {
+  companyId: string;
+  title: string;
+  description?: string;
+  assigneeAgentId?: string;
+  assigneeUserId?: string;
+  projectId?: string | null;
   authorAgentId?: string;
   authorUserId?: string;
-  filename: string;
-  contentType: string;
-  body: Buffer;
+  authorKind?: AuthorKind;
+  priority?: number;
+  labelIds?: string[];
 }
 
-export interface RouterReadMessage {
+export interface RouterUpdateIssueArgs {
+  companyId: string;
+  issueId: string;
+  title?: string | null;
+  description?: string | null;
+  assigneeAgentId?: string | null;
+  status?: string | null;
+  priority?: number | null;
+  authorAgentId?: string;
+  authorUserId?: string;
+  authorKind?: AuthorKind;
+}
+
+export interface RouterReadComment {
   refId: string;
-  externalMessageRef: string;
+  externalCommentRef: string;
   body: string;
   authorAgentId: string | null;
   authorUserId: string | null;
@@ -95,74 +76,31 @@ export interface RouterReadMessage {
   suppressedForWake: boolean;
 }
 
-export interface MessagingRouter {
+export interface IssueTrackerRouter {
   backend: BackendKey;
-  getOrCreateChannel(args: {
-    companyId: string;
-    projectId: string | null;
-    issueId?: string;
-  }): Promise<{ id: string; externalRef: string }>;
-  getOrCreateThread(args: {
-    companyId: string;
-    issueId: string;
-    projectId: string | null;
-  }): Promise<{ id: string; threadRef: string; channelId: string }>;
-  postMessage(args: RouterPostArgs): Promise<{
+  createIssue(args: RouterCreateIssueArgs): Promise<{ issueId: string; identifier: string }>;
+  updateIssue(args: RouterUpdateIssueArgs): Promise<void>;
+  postComment(args: RouterPostCommentArgs): Promise<{
     id: string;
-    externalMessageRef: string;
+    externalCommentRef: string;
     createdAt: Date;
   }>;
-  /**
-   * Upload an attachment's bytes into the Slack thread the given message ref
-   * belongs to. Used by the retroactive attachment-upload HTTP route — agents
-   * post a comment first, then POST /attachments with an issueCommentId. This
-   * method ships the bytes to the same thread and records the file id on the
-   * ref's metadata.
-   */
-  uploadAttachmentToMessage(args: UploadAttachmentArgs): Promise<{
-    slackFileId: string | null;
-  }>;
-  getThreadMessages(args: {
+  editComment(args: { refId: string; body: string }): Promise<void>;
+  deleteComment(args: { refId: string; by: AuthorIdentity }): Promise<void>;
+  getComments(args: {
     issueId: string;
     afterRefId?: string;
-  }): Promise<RouterReadMessage[]>;
-  onIssueStateChange(issueId: string): Promise<void>;
-  /**
-   * Update the messaging thread's locked state for an issue. When an issue
-   * transitions to `done` / `cancelled`, callers flip this to true so that
-   * further comments are rejected by postMessage and dropped by the events
-   * processor. Re-opening an issue flips it back to false.
-   */
-  setThreadLocked(issueId: string, locked: boolean): Promise<void>;
-  ensureChannelMember(args: {
-    companyId: string;
-    projectId: string | null;
-    agentId?: string;
-    userId?: string;
-  }): Promise<void>;
+  }): Promise<RouterReadComment[]>;
 }
 
-export function normalizeChannelName(raw: string, maxLen = 80): string {
-  const cleaned = raw
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, maxLen);
-  return cleaned.length ? cleaned : "proj";
-}
-
-function buildCredential(row: {
-  authBlobSecretId: string | null;
-}): AdapterCredential {
+function buildCredential(row: { authBlobSecretId: string | null }) {
   if (row.authBlobSecretId) {
-    return { kind: "user_token", secretId: row.authBlobSecretId };
+    return { kind: "user_token" as const, secretId: row.authBlobSecretId };
   }
-  return { kind: "none" };
+  return { kind: "none" as const };
 }
 
-export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
-  const prefix = deps.channelNamePrefix ?? "proj-";
-  const urlBase = deps.issueUrlBase ?? "";
+export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
   const adapter = deps.adapter;
   const workspaceInstallId = deps.workspaceInstallId ?? null;
 
@@ -175,9 +113,6 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
       eq(messagingIdentities.backend, deps.backend),
       eq(messagingIdentities.companyId, args.companyId),
     ];
-    // Defense-in-depth: for Slack, also require the identity to belong to
-    // this router's workspace install. Prevents a company-matching row from
-    // a prior workspace install from being picked up accidentally.
     if (workspaceInstallId) {
       whereClauses.push(
         eq(messagingIdentities.workspaceInstallId, workspaceInstallId),
@@ -190,395 +125,222 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
     } else {
       return undefined;
     }
-    const rows = await deps.db
+    const [row] = await deps.db
       .select()
       .from(messagingIdentities)
       .where(and(...whereClauses))
       .limit(1);
-    return rows[0];
+    return row;
   }
 
-  async function loadChannel(channelId: string) {
-    const rows = await deps.db
-      .select()
-      .from(messagingChannels)
-      .where(eq(messagingChannels.id, channelId))
-      .limit(1);
-    return rows[0];
+  async function resolveAuthorIdentity(args: {
+    companyId: string;
+    agentId?: string;
+    userId?: string;
+    kindHint?: AuthorKind;
+  }): Promise<AuthorIdentity> {
+    const kind: AuthorKind =
+      args.kindHint ??
+      (args.agentId ? "agent" : args.userId ? "user" : "bot_system");
+    if (kind === "bot_system") {
+      return {
+        backend: deps.backend,
+        externalUserRef: "SYSTEM",
+        credential:
+          deps.backend === "fake" ? { kind: "none" } : { kind: "bot_token" },
+      };
+    }
+    const identity = await loadIdentity({
+      companyId: args.companyId,
+      agentId: args.agentId,
+      userId: args.userId,
+    });
+    if (!identity) {
+      return {
+        backend: deps.backend,
+        externalUserRef: "SYSTEM",
+        credential:
+          deps.backend === "fake" ? { kind: "none" } : { kind: "bot_token" },
+      };
+    }
+    if (identity.state !== "active") {
+      throw new MessagingIdentityNotActive(identity.id);
+    }
+    return {
+      backend: deps.backend,
+      externalUserRef: identity.externalUserRef,
+      credential: buildCredential(identity),
+    };
   }
 
-  async function loadThread(issueId: string) {
-    const rows = await deps.db
-      .select()
-      .from(messagingThreads)
-      .where(eq(messagingThreads.issueId, issueId))
-      .limit(1);
-    return rows[0];
-  }
-
-  async function buildIssueCardInput(issueId: string): Promise<IssueCardInput | null> {
-    const rows = await deps.db
+  async function requireCachedIssue(issueId: string) {
+    const [row] = await deps.db
       .select()
       .from(issuesTable)
       .where(eq(issuesTable.id, issueId))
       .limit(1);
-    const issue = rows[0];
-    if (!issue) return null;
-    return {
-      identifier: issue.identifier ?? issue.id.slice(0, 8),
-      title: issue.title ?? "",
-      status: issue.status ?? "",
-      priority: issue.priority ?? undefined,
-      descriptionExcerpt: issue.description?.slice(0, 200) ?? undefined,
-      issueUrl: `${urlBase}/issues/${issue.id}`,
-    };
+    if (!row) throw new Error(`issue ${issueId} not found in cache`);
+    if (!row.linearIssueId) {
+      throw new Error(
+        `issue ${issueId} has no linear_issue_id — cannot route to external tracker until it's created there`,
+      );
+    }
+    return row;
   }
 
-  const router: MessagingRouter = {
+  const router: IssueTrackerRouter = {
     backend: deps.backend,
 
-    async getOrCreateChannel({ companyId, projectId, issueId }) {
-      if (projectId) {
-        const existing = await deps.db
-          .select()
-          .from(messagingChannels)
-          .where(
-            and(
-              eq(messagingChannels.companyId, companyId),
-              eq(messagingChannels.backend, deps.backend),
-              eq(messagingChannels.projectId, projectId),
-            ),
-          )
-          .limit(1);
-        if (existing[0]) {
-          return { id: existing[0].id, externalRef: existing[0].externalChannelRef };
-        }
-
-        const projectRows = await deps.db
-          .select({ name: projectsTable.name })
-          .from(projectsTable)
-          .where(eq(projectsTable.id, projectId))
-          .limit(1);
-        const project = projectRows[0];
-        if (!project) throw new Error(`project ${projectId} not found`);
-
-
-        const nameSource = project.name ?? "proj";
-        const name = normalizeChannelName(prefix + nameSource);
-        const created = await adapter.createChannel({ name, purpose: "project" });
-
-        const [row] = await deps.db
-          .insert(messagingChannels)
-          .values({
-            companyId,
-            backend: deps.backend,
-            workspaceInstallId,
-            purpose: "project",
-            projectId,
-            externalChannelRef: created.externalRef,
-            externalChannelName: created.name,
-          })
-          .returning();
-        return { id: row!.id, externalRef: row!.externalChannelRef };
-      }
-
-      // Ad-hoc channel keyed on issueId for issues without a project.
-      if (!issueId) throw new Error("getOrCreateChannel: need projectId or issueId");
-      const adhocExternalRef = `C_adhoc_${issueId}`;
-      const existingAdhoc = await deps.db
-        .select()
-        .from(messagingChannels)
-        .where(
-          and(
-            eq(messagingChannels.companyId, companyId),
-            eq(messagingChannels.backend, deps.backend),
-            eq(messagingChannels.externalChannelRef, adhocExternalRef),
-          ),
-        )
-        .limit(1);
-      if (existingAdhoc[0]) {
-        return { id: existingAdhoc[0].id, externalRef: existingAdhoc[0].externalChannelRef };
-      }
-
-
-      const name = normalizeChannelName(`${prefix}issue-${issueId.slice(0, 8)}`);
-      const created = await adapter.createChannel({ name, purpose: "ad_hoc" });
-
-      const [adhocRow] = await deps.db
-        .insert(messagingChannels)
-        .values({
-          companyId,
-          backend: deps.backend,
-          workspaceInstallId,
-          purpose: "ad_hoc",
-          externalChannelRef: created.externalRef,
-          externalChannelName: created.name,
-        })
-        .returning();
-      return { id: adhocRow!.id, externalRef: adhocRow!.externalChannelRef };
-    },
-
-    async getOrCreateThread({ companyId, issueId, projectId }) {
-      const existing = await loadThread(issueId);
-      if (existing) {
-        return {
-          id: existing.id,
-          threadRef: existing.externalThreadRef,
-          channelId: existing.channelId,
-        };
-      }
-
-      const channel = await this.getOrCreateChannel({ companyId, projectId, issueId });
-      const card = await buildIssueCardInput(issueId);
-      if (!card) throw new Error(`issue ${issueId} not found`);
-
-
-      const created = await adapter.createThread({
-        channelRef: channel.externalRef,
-        parentBlocks: null,
-        fallbackText: fallbackCardText(card),
-      });
-
-      const [row] = await deps.db
-        .insert(messagingThreads)
-        .values({
-          issueId,
-          channelId: channel.id,
-          backend: deps.backend,
-          externalThreadRef: created.threadRef,
-          parentMessageRef: created.parentMessageRef,
-        })
-        .returning();
-      return {
-        id: row!.id,
-        threadRef: row!.externalThreadRef,
-        channelId: row!.channelId,
-      };
-    },
-
-    async postMessage(args) {
-      const thread = await this.getOrCreateThread({
+    async createIssue(args) {
+      const author = await resolveAuthorIdentity({
         companyId: args.companyId,
-        issueId: args.issueId,
-        projectId: args.projectId,
+        agentId: args.authorAgentId,
+        userId: args.authorUserId,
+        kindHint: args.authorKind,
       });
+      const result = await adapter.createIssue({
+        externalTeamRef: "",
+        title: args.title,
+        description: args.description ?? null,
+        assigneeExternalRef: null,
+        stateExternalRef: null,
+        priority: args.priority ?? null,
+        labelExternalRefs: [],
+        author,
+      });
+      return { issueId: "", identifier: result.identifier };
+    },
 
-      const threadRow = await loadThread(args.issueId);
-      if (threadRow?.state === "locked") {
-        throw new MessagingThreadLocked(thread.id);
-      }
+    async updateIssue(args) {
+      const cached = await requireCachedIssue(args.issueId);
+      const author = await resolveAuthorIdentity({
+        companyId: args.companyId,
+        agentId: args.authorAgentId,
+        userId: args.authorUserId,
+        kindHint: args.authorKind,
+      });
+      await adapter.updateIssue({
+        externalIssueRef: cached.linearIssueId!,
+        title: args.title ?? undefined,
+        description: args.description ?? undefined,
+        assigneeExternalRef: args.assigneeAgentId ? undefined : null,
+        stateExternalRef: undefined,
+        priority: args.priority ?? undefined,
+        author,
+      });
+    },
 
-      const channel = await loadChannel(thread.channelId);
-      if (!channel) throw new Error(`channel for thread ${thread.id} not found`);
-
-      // bot_system posts (no agent/user, or authorKind = 'bot_system')
-      // author as the workspace bot — used for heartbeat recovery,
-      // locked-thread replies, and other server-generated messages. Slack
-      // posts with a bot_token credential so the message attributes to the
-      // Paperclip app, not a fake SYSTEM user.
-      const kind: AuthorKind =
-        args.authorKind ??
-        (args.authorAgentId
-          ? "agent"
-          : args.authorUserId
-            ? "user"
-            : "bot_system");
-      let authorIdentity: AuthorIdentity;
-      if (kind === "bot_system") {
-        authorIdentity = {
-          backend: deps.backend,
-          externalUserRef: "SYSTEM",
-          credential:
-            deps.backend === "slack" ? { kind: "bot_token" } : { kind: "none" },
-        };
-      } else {
-        const identity = await loadIdentity({
-          companyId: args.companyId,
-          agentId: args.authorAgentId,
-          userId: args.authorUserId,
-        });
-        if (!identity) {
-          // No identity linked yet: fall back to bot_system authoring so
-          // newly-hired agents can post before Slack OAuth is completed.
-          // The ref row still attributes the agent; only the Slack-visible
-          // author becomes the workspace bot principal.
-          authorIdentity = {
-            backend: deps.backend,
-            externalUserRef: "SYSTEM",
-            credential:
-              deps.backend === "slack" ? { kind: "bot_token" } : { kind: "none" },
-          };
-        } else if (identity.state !== "active") {
-          // Identity exists but pending_auth / revoked — that's a real
-          // configuration bug, surface it instead of silently downgrading.
-          throw new MessagingIdentityNotActive(identity.id);
-        } else {
-          authorIdentity = {
-            backend: deps.backend,
-            externalUserRef: identity.externalUserRef,
-            credential: buildCredential(identity),
-          };
-        }
-      }
-
-
-      const posted = await adapter.postMessage({
-        channelRef: channel.externalChannelRef,
-        threadRef: thread.threadRef,
-        authorIdentity,
+    async postComment(args) {
+      const cached = await requireCachedIssue(args.issueId);
+      const author = await resolveAuthorIdentity({
+        companyId: args.companyId,
+        agentId: args.authorAgentId,
+        userId: args.authorUserId,
+        kindHint: args.authorKind,
+      });
+      const posted = await adapter.postComment({
+        externalIssueRef: cached.linearIssueId!,
+        author,
         body: args.body,
-        blocks: args.blocks,
         attachments: args.attachments,
       });
-
-      const metadata: Record<string, unknown> | null =
-        posted.slackFileIds && posted.slackFileIds.length > 0
-          ? { slackFileIds: posted.slackFileIds }
-          : null;
-
       const [inserted] = await deps.db
-        .insert(messagingMessageRefs)
+        .insert(issueCommentRefs)
         .values({
-          threadId: thread.id,
+          issueId: args.issueId,
           backend: deps.backend,
-          externalMessageRef: posted.messageRef,
+          externalMessageRef: posted.externalCommentRef,
           authorAgentId: args.authorAgentId ?? null,
           authorUserId: args.authorUserId ?? null,
           createdByRunId: args.createdByRunId ?? null,
-          metadata,
         })
         .onConflictDoUpdate({
           target: [
-            messagingMessageRefs.threadId,
-            messagingMessageRefs.externalMessageRef,
+            issueCommentRefs.issueId,
+            issueCommentRefs.externalMessageRef,
           ],
           set: {
             authorAgentId: args.authorAgentId ?? null,
             authorUserId: args.authorUserId ?? null,
             createdByRunId: args.createdByRunId ?? null,
-            ...(metadata ? { metadata } : {}),
           },
         })
         .returning();
       return {
         id: inserted!.id,
-        externalMessageRef: inserted!.externalMessageRef,
+        externalCommentRef: inserted!.externalMessageRef,
         createdAt: posted.createdAt,
       };
     },
 
-    async uploadAttachmentToMessage(args) {
-      const rows = await deps.db
+    async editComment(args) {
+      const [ref] = await deps.db
         .select()
-        .from(messagingMessageRefs)
-        .where(eq(messagingMessageRefs.id, args.refId))
+        .from(issueCommentRefs)
+        .where(eq(issueCommentRefs.id, args.refId))
         .limit(1);
-      const ref = rows[0];
-      if (!ref) throw new Error(`message ref ${args.refId} not found`);
-      if (ref.backend !== deps.backend) return { slackFileId: null };
-
-      const threadRows = await deps.db
-        .select()
-        .from(messagingThreads)
-        .where(eq(messagingThreads.id, ref.threadId))
-        .limit(1);
-      const thread = threadRows[0];
-      if (!thread) throw new Error(`thread ${ref.threadId} not found`);
-      const channel = await loadChannel(thread.channelId);
-      if (!channel) throw new Error(`channel for thread ${thread.id} not found`);
-
-
-      if (!adapter.uploadAttachmentToThread) return { slackFileId: null };
-
-      let authorIdentity: AuthorIdentity;
-      if (!args.authorAgentId && !args.authorUserId) {
-        authorIdentity = {
-          backend: deps.backend,
-          externalUserRef: "SYSTEM",
-          credential:
-            deps.backend === "slack" ? { kind: "bot_token" } : { kind: "none" },
-        };
-      } else {
-        const identity = await loadIdentity({
-          companyId: channel.companyId,
-          agentId: args.authorAgentId,
-          userId: args.authorUserId,
-        });
-        if (!identity || identity.state !== "active") {
-          throw new MessagingIdentityNotActive(identity?.id ?? "none");
-        }
-        authorIdentity = {
-          backend: deps.backend,
-          externalUserRef: identity.externalUserRef,
-          credential: buildCredential(identity),
-        };
-      }
-
-      const uploaded = await adapter.uploadAttachmentToThread({
-        channelRef: channel.externalChannelRef,
-        threadRef: thread.externalThreadRef,
-        by: authorIdentity,
-        filename: args.filename,
-        contentType: args.contentType,
-        body: args.body,
-      });
-
-      if (uploaded.slackFileId) {
-        const existingMeta = (ref.metadata ?? {}) as Record<string, unknown>;
-        const existingIds = Array.isArray(existingMeta.slackFileIds)
-          ? (existingMeta.slackFileIds as string[])
-          : [];
-        const mergedIds = [...existingIds, uploaded.slackFileId];
-        await deps.db
-          .update(messagingMessageRefs)
-          .set({ metadata: { ...existingMeta, slackFileIds: mergedIds } })
-          .where(eq(messagingMessageRefs.id, ref.id));
-      }
-      return { slackFileId: uploaded.slackFileId };
+      if (!ref) return;
+      await adapter.editComment(ref.externalMessageRef, args.body);
     },
 
-    async getThreadMessages({ issueId, afterRefId }) {
-      const thread = await loadThread(issueId);
-      if (!thread) return [];
+    async deleteComment(args) {
+      const [ref] = await deps.db
+        .select()
+        .from(issueCommentRefs)
+        .where(eq(issueCommentRefs.id, args.refId))
+        .limit(1);
+      if (!ref) return;
+      await adapter.deleteComment(ref.externalMessageRef, args.by);
+    },
 
+    async getComments({ issueId, afterRefId }) {
       let afterFirstSeen: Date | null = null;
       if (afterRefId) {
-        const [cursorRow] = await deps.db
-          .select({ firstSeenAt: messagingMessageRefs.firstSeenAt })
-          .from(messagingMessageRefs)
-          .where(eq(messagingMessageRefs.id, afterRefId))
+        const [cursor] = await deps.db
+          .select({ firstSeenAt: issueCommentRefs.firstSeenAt })
+          .from(issueCommentRefs)
+          .where(eq(issueCommentRefs.id, afterRefId))
           .limit(1);
-        if (cursorRow) afterFirstSeen = cursorRow.firstSeenAt;
+        if (cursor) afterFirstSeen = cursor.firstSeenAt;
       }
-
-      const whereClauses = [eq(messagingMessageRefs.threadId, thread.id)];
+      const whereClauses = [eq(issueCommentRefs.issueId, issueId)];
       if (afterFirstSeen) {
-        whereClauses.push(gt(messagingMessageRefs.firstSeenAt, afterFirstSeen));
+        whereClauses.push(gt(issueCommentRefs.firstSeenAt, afterFirstSeen));
       }
-
       const refs = await deps.db
         .select()
-        .from(messagingMessageRefs)
+        .from(issueCommentRefs)
         .where(and(...whereClauses))
-        .orderBy(messagingMessageRefs.firstSeenAt);
+        .orderBy(issueCommentRefs.firstSeenAt);
 
-
-      const channel = await loadChannel(thread.channelId);
-      if (!channel) return [];
-
-      const liveMessages = await adapter.getThreadMessages(
-        channel.externalChannelRef,
-        thread.externalThreadRef,
-      );
-      const bodyByRef = new Map(
-        liveMessages.map((m) => [m.externalMessageRef, m.body]),
-      );
-
+      const [cachedIssue] = await deps.db
+        .select()
+        .from(issuesTable)
+        .where(eq(issuesTable.id, issueId))
+        .limit(1);
+      if (!cachedIssue || !cachedIssue.linearIssueId) {
+        return refs
+          .filter((r) => !r.deletedAt)
+          .map((r) => ({
+            refId: r.id,
+            externalCommentRef: r.externalMessageRef,
+            body: "",
+            authorAgentId: r.authorAgentId,
+            authorUserId: r.authorUserId,
+            createdByRunId: r.createdByRunId,
+            firstSeenAt: r.firstSeenAt,
+            editedAt: r.editedAt,
+            deletedAt: r.deletedAt,
+            suppressedForWake: r.suppressedForWake,
+          }));
+      }
+      const live = await adapter.getComments(cachedIssue.linearIssueId);
+      const bodyByRef = new Map(live.map((c) => [c.externalCommentRef, c.body]));
       return refs
         .filter((r) => !r.deletedAt)
         .map((r) => ({
           refId: r.id,
-          externalMessageRef: r.externalMessageRef,
+          externalCommentRef: r.externalMessageRef,
           body: bodyByRef.get(r.externalMessageRef) ?? "",
           authorAgentId: r.authorAgentId,
           authorUserId: r.authorUserId,
@@ -589,60 +351,11 @@ export function createMessagingRouter(deps: RouterDeps): MessagingRouter {
           suppressedForWake: r.suppressedForWake,
         }));
     },
-
-    async setThreadLocked(issueId: string, locked: boolean) {
-      const thread = await loadThread(issueId);
-      if (!thread) return;
-      const nextState = locked ? "locked" : "open";
-      if (thread.state === nextState) return;
-      await deps.db
-        .update(messagingThreads)
-        .set({ state: nextState, updatedAt: new Date() })
-        .where(eq(messagingThreads.id, thread.id));
-      // Adapter-side lockThread is a best-effort (Slack has no native lock;
-      // FakeAdapter flips an internal flag). Errors are logged and swallowed.
-      if (locked) {
-        try {
-
-          await adapter.lockThread(thread.externalThreadRef);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn(`messaging: adapter.lockThread failed for ${issueId}`, err);
-        }
-      }
-    },
-
-    async onIssueStateChange(issueId) {
-      const thread = await loadThread(issueId);
-      if (!thread) return;
-      const channel = await loadChannel(thread.channelId);
-      if (!channel) return;
-
-      const card = await buildIssueCardInput(issueId);
-      if (!card) return;
-
-
-      try {
-        await adapter.editMessage(
-          channel.externalChannelRef,
-          thread.parentMessageRef,
-          fallbackCardText(card),
-        );
-      } catch (err) {
-        // Card update is fire-and-forget; log but do not fail caller.
-        // eslint-disable-next-line no-console
-        console.warn(`messaging: issue card edit failed for ${issueId}`, err);
-      }
-    },
-
-    async ensureChannelMember({ companyId, projectId, agentId, userId }) {
-      const channel = await this.getOrCreateChannel({ companyId, projectId, issueId: undefined });
-      const identity = await loadIdentity({ companyId, agentId, userId });
-      if (!identity || identity.state !== "active") return;
-
-      await adapter.addChannelMember(channel.externalRef, identity.externalUserRef);
-    },
   };
 
   return router;
 }
+
+// Transitional aliases — removed in Task 10g final cleanup.
+export const createMessagingRouter = createIssueTrackerRouter;
+export type MessagingRouter = IssueTrackerRouter;

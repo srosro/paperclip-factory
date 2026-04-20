@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import {
   issues as issuesTable,
-  messagingMessageRefs,
+  issueCommentRefs,
 } from "@paperclipai/db";
 import type { Db } from "./router.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -42,9 +42,9 @@ export async function handleMessageCreatedSideEffects(
   // Re-check suppressedForWake in case the ref was flipped between creation
   // and dispatch (queued-comment cancel flow).
   const [ref] = await deps.db
-    .select({ suppressedForWake: messagingMessageRefs.suppressedForWake })
-    .from(messagingMessageRefs)
-    .where(eq(messagingMessageRefs.id, args.refId))
+    .select({ suppressedForWake: issueCommentRefs.suppressedForWake })
+    .from(issueCommentRefs)
+    .where(eq(issueCommentRefs.id, args.refId))
     .limit(1);
   if (!ref || ref.suppressedForWake) return;
 
@@ -131,14 +131,14 @@ export async function handleMessageCreatedSideEffects(
   // Best-effort mark as processed so readers can tell at-a-glance in the
   // diagnose endpoint whether side effects fired for a ref.
   void deps.db
-    .update(messagingMessageRefs)
+    .update(issueCommentRefs)
     .set({
-      metadata: sql`COALESCE(${messagingMessageRefs.metadata}, '{}'::jsonb) || jsonb_build_object('sideEffectsDispatchedAt', ${new Date().toISOString()}::text)`,
+      metadata: sql`COALESCE(${issueCommentRefs.metadata}, '{}'::jsonb) || jsonb_build_object('sideEffectsDispatchedAt', ${new Date().toISOString()}::text)`,
     })
     .where(
       and(
-        eq(messagingMessageRefs.id, args.refId),
-        eq(messagingMessageRefs.suppressedForWake, false),
+        eq(issueCommentRefs.id, args.refId),
+        eq(issueCommentRefs.suppressedForWake, false),
       ),
     )
     .catch(() => {

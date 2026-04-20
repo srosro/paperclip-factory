@@ -1,35 +1,17 @@
-import { eq, and, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
-  messagingChannels,
-  messagingThreads,
+  issues as issuesTable,
+  issueCommentRefs,
   messagingIdentities,
-  messagingMessageRefs,
   messagingEventsInbox,
 } from "@paperclipai/db";
-import type { BackendKey, IncomingFileRef, MessagingEvent } from "./types.js";
+import type { BackendKey, MessagingEvent } from "./types.js";
 import type { Db } from "./router.js";
-
-export interface IngestInboundFilesArgs {
-  companyId: string;
-  issueId: string;
-  refId: string;
-  authorExternalRef: string;
-  files: IncomingFileRef[];
-}
 
 export interface EventsDeps {
   db: Db;
   backend: BackendKey;
-  /**
-   * Workspace install this processor is scoped to. Required for the Slack
-   * backend — channel/identity lookups filter by it so rows never bleed
-   * across workspaces. Null for the fake adapter (tests/dev).
-   */
   workspaceInstallId?: string | null;
-  /**
-   * Fired after a new-message event is persisted as a ref row, only when
-   * the ref's suppressedForWake flag is false.
-   */
   onMessageCreated?: (args: {
     refId: string;
     companyId: string;
@@ -38,24 +20,10 @@ export interface EventsDeps {
     authorUserId: string | null;
     authorExternalRef: string;
     mentionedAgentIds: string[];
-    mentionedUserIds: string[];
   }) => Promise<void>;
-  /**
-   * Optional mention resolver — adapters that can pre-parse mentions from
-   * raw body should expose this. Events module passes in the raw body and
-   * expects lists of Paperclip agent ids + user ids (for inbox dispatch).
-   */
-  resolveMentions?: (
-    rawBody: string,
-  ) => Promise<{ agentIds: string[]; userIds: string[] }>;
-  /**
-   * Optional: backend-specific file ingest. Called for each inbound message
-   * that carries files. The implementation must download bytes (using a user
-   * token when needed), register assets, and insert issue_attachments rows.
-   * Errors must be logged and swallowed — partial ingest is preferable to
-   * dropping the whole event.
-   */
-  ingestInboundFiles?: (args: IngestInboundFilesArgs) => Promise<void>;
+  resolveMentions?: (rawBody: string) => Promise<{
+    agentIds: string[];
+  }>;
 }
 
 export interface EventsProcessor {
@@ -65,13 +33,9 @@ export interface EventsProcessor {
 export function createEventsProcessor(deps: EventsDeps): EventsProcessor {
   return {
     async handle(event) {
-      // Idempotency: insert event id; if duplicate, skip.
       const inserted = await deps.db
         .insert(messagingEventsInbox)
-        .values({
-          backend: deps.backend,
-          externalEventId: event.externalEventId,
-        })
+        .values({ backend: deps.backend, externalEventId: event.externalEventId })
         .onConflictDoNothing({
           target: [
             messagingEventsInbox.backend,
@@ -82,18 +46,27 @@ export function createEventsProcessor(deps: EventsDeps): EventsProcessor {
       if (inserted.length === 0) return;
 
       switch (event.kind) {
-        case "message":
-          await handleNewMessage(deps, event);
+        case "comment_created":
+          await handleCommentCreated(deps, event);
           break;
-        case "message_changed":
-          await handleEdit(deps, event);
+        case "comment_updated":
+          await handleCommentUpdated(deps, event);
           break;
-        case "message_deleted":
-          await handleDelete(deps, event);
+        case "comment_deleted":
+          await handleCommentDeleted(deps, event);
           break;
         case "reaction_added":
         case "reaction_removed":
           await handleReaction(deps, event);
+          break;
+        case "issue_created":
+        case "issue_updated":
+        case "issue_assignee_changed":
+        case "issue_removed":
+        case "labels_changed":
+        case "attachment_changed":
+        case "project_changed":
+          // Cache-sync handlers land in Plan B.
           break;
       }
 
@@ -110,122 +83,81 @@ export function createEventsProcessor(deps: EventsDeps): EventsProcessor {
   };
 }
 
-async function handleNewMessage(
+async function handleCommentCreated(
   deps: EventsDeps,
-  event: Extract<MessagingEvent, { kind: "message" }>,
+  event: Extract<MessagingEvent, { kind: "comment_created" }>,
 ) {
-  const channel = await loadChannelByExternal(deps, event.channelRef);
-  if (!channel) return; // not one of ours
-
-  const threadRef = event.threadRef ?? event.messageRef;
-  const thread = await loadThreadByExternal(deps, channel.id, threadRef);
-  if (!thread) return; // either top-level message or a thread we don't track
-
-  if (thread.state === "locked") return; // thread is locked; don't record or wake
+  const [issue] = await deps.db
+    .select()
+    .from(issuesTable)
+    .where(eq(issuesTable.linearIssueId, event.externalIssueRef))
+    .limit(1);
+  if (!issue) return;
 
   const author = await loadIdentityByExternal(deps, event.authorExternalRef);
 
   const [row] = await deps.db
-    .insert(messagingMessageRefs)
+    .insert(issueCommentRefs)
     .values({
-      threadId: thread.id,
+      issueId: issue.id,
       backend: deps.backend,
-      externalMessageRef: event.messageRef,
+      externalMessageRef: event.externalCommentRef,
       authorAgentId: author?.agentId ?? null,
       authorUserId: author?.userId ?? null,
       firstSeenAt: event.createdAt,
     })
     .onConflictDoNothing({
-      target: [
-        messagingMessageRefs.threadId,
-        messagingMessageRefs.externalMessageRef,
-      ],
+      target: [issueCommentRefs.issueId, issueCommentRefs.externalMessageRef],
     })
     .returning();
-  if (!row) return; // already existed (agent-write path already inserted)
-
-  // Ingest any inbound files (Slack attachments) before wake-up hooks so the
-  // wake-up signal observes the full state. Errors must be swallowed so
-  // wake-up still fires when file ingest fails.
-  if (event.files && event.files.length > 0 && deps.ingestInboundFiles) {
-    try {
-      await deps.ingestInboundFiles({
-        companyId: channel.companyId,
-        issueId: thread.issueId,
-        refId: row.id,
-        authorExternalRef: event.authorExternalRef,
-        files: event.files,
-      });
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `messaging: ingestInboundFiles failed for ref=${row.id}`,
-        err,
-      );
-    }
-  }
-
+  if (!row) return;
   if (row.suppressedForWake) return;
-
   if (!deps.onMessageCreated) return;
 
   const resolved = deps.resolveMentions
     ? await deps.resolveMentions(event.bodyRaw)
-    : { agentIds: [], userIds: [] };
+    : { agentIds: [] };
 
   await deps.onMessageCreated({
     refId: row.id,
-    companyId: channel.companyId,
-    issueId: thread.issueId,
+    companyId: issue.companyId,
+    issueId: issue.id,
     authorAgentId: row.authorAgentId,
     authorUserId: row.authorUserId,
     authorExternalRef: event.authorExternalRef,
     mentionedAgentIds: resolved.agentIds,
-    mentionedUserIds: resolved.userIds,
   });
 }
 
-async function handleEdit(
+async function handleCommentUpdated(
   deps: EventsDeps,
-  event: Extract<MessagingEvent, { kind: "message_changed" }>,
+  event: Extract<MessagingEvent, { kind: "comment_updated" }>,
 ) {
-  const channel = await loadChannelByExternal(deps, event.channelRef);
-  if (!channel) return;
-  // Update the row identified by (channel's thread, external_message_ref). A
-  // message's (thread_id, external_message_ref) uniquely identifies one row.
   await deps.db
-    .update(messagingMessageRefs)
+    .update(issueCommentRefs)
     .set({
       editedAt: event.editedAt,
-      editCount: sql`${messagingMessageRefs.editCount} + 1`,
+      editCount: sql`${issueCommentRefs.editCount} + 1`,
     })
     .where(
       and(
-        eq(messagingMessageRefs.externalMessageRef, event.messageRef),
-        sql`${messagingMessageRefs.threadId} IN (
-          SELECT id FROM ${messagingThreads}
-          WHERE ${messagingThreads.channelId} = ${channel.id}
-        )`,
+        eq(issueCommentRefs.backend, deps.backend),
+        eq(issueCommentRefs.externalMessageRef, event.externalCommentRef),
       ),
     );
 }
 
-async function handleDelete(
+async function handleCommentDeleted(
   deps: EventsDeps,
-  event: Extract<MessagingEvent, { kind: "message_deleted" }>,
+  event: Extract<MessagingEvent, { kind: "comment_deleted" }>,
 ) {
-  const channel = await loadChannelByExternal(deps, event.channelRef);
-  if (!channel) return;
   await deps.db
-    .update(messagingMessageRefs)
+    .update(issueCommentRefs)
     .set({ deletedAt: event.deletedAt })
     .where(
       and(
-        eq(messagingMessageRefs.externalMessageRef, event.messageRef),
-        sql`${messagingMessageRefs.threadId} IN (
-          SELECT id FROM ${messagingThreads}
-          WHERE ${messagingThreads.channelId} = ${channel.id}
-        )`,
+        eq(issueCommentRefs.backend, deps.backend),
+        eq(issueCommentRefs.externalMessageRef, event.externalCommentRef),
       ),
     );
 }
@@ -234,80 +166,28 @@ async function handleReaction(
   deps: EventsDeps,
   event: Extract<MessagingEvent, { kind: "reaction_added" | "reaction_removed" }>,
 ) {
-  const channel = await loadChannelByExternal(deps, event.channelRef);
-  if (!channel) return;
   const [row] = await deps.db
     .select()
-    .from(messagingMessageRefs)
-    .innerJoin(
-      messagingThreads,
-      eq(messagingThreads.id, messagingMessageRefs.threadId),
-    )
+    .from(issueCommentRefs)
     .where(
       and(
-        eq(messagingMessageRefs.externalMessageRef, event.messageRef),
-        eq(messagingThreads.channelId, channel.id),
+        eq(issueCommentRefs.backend, deps.backend),
+        eq(issueCommentRefs.externalMessageRef, event.externalCommentRef),
       ),
     )
     .limit(1);
   if (!row) return;
-
-  const ref = row.messaging_message_refs;
   const current: Record<string, string[]> =
-    (ref.reactions as Record<string, string[]> | null) ?? {};
+    (row.reactions as Record<string, string[]> | null) ?? {};
   const reactors = new Set(current[event.emoji] ?? []);
-  if (event.kind === "reaction_added") {
-    reactors.add(event.reactorExternalRef);
-  } else {
-    reactors.delete(event.reactorExternalRef);
-  }
-  if (reactors.size > 0) {
-    current[event.emoji] = [...reactors];
-  } else {
-    delete current[event.emoji];
-  }
+  if (event.kind === "reaction_added") reactors.add(event.reactorExternalRef);
+  else reactors.delete(event.reactorExternalRef);
+  if (reactors.size > 0) current[event.emoji] = [...reactors];
+  else delete current[event.emoji];
   await deps.db
-    .update(messagingMessageRefs)
+    .update(issueCommentRefs)
     .set({ reactions: current })
-    .where(eq(messagingMessageRefs.id, ref.id));
-}
-
-async function loadChannelByExternal(deps: EventsDeps, externalRef: string) {
-  // Prefer workspace-scoped lookup for Slack; fall back to backend-scoped
-  // lookup for the fake adapter (tests/dev).
-  const whereClauses = deps.workspaceInstallId
-    ? and(
-        eq(messagingChannels.workspaceInstallId, deps.workspaceInstallId),
-        eq(messagingChannels.externalChannelRef, externalRef),
-      )
-    : and(
-        eq(messagingChannels.backend, deps.backend),
-        eq(messagingChannels.externalChannelRef, externalRef),
-      );
-  const rows = await deps.db
-    .select()
-    .from(messagingChannels)
-    .where(whereClauses)
-    .limit(1);
-  return rows[0];
-}
-
-async function loadThreadByExternal(
-  deps: EventsDeps,
-  channelId: string,
-  externalRef: string,
-) {
-  const rows = await deps.db
-    .select()
-    .from(messagingThreads)
-    .where(
-      and(
-        eq(messagingThreads.channelId, channelId),
-        eq(messagingThreads.externalThreadRef, externalRef),
-      ),
-    )
-    .limit(1);
-  return rows[0];
+    .where(eq(issueCommentRefs.id, row.id));
 }
 
 async function loadIdentityByExternal(deps: EventsDeps, externalRef: string) {
