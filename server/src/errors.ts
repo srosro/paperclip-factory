@@ -49,7 +49,6 @@ import {
   MessagingBackendUnavailable,
   MessagingIdentityNotActive,
   MessagingNotConfigured,
-  MessagingThreadLocked,
 } from "./messaging/types.js";
 
 /**
@@ -68,12 +67,6 @@ export function translateMessagingError(err: unknown): unknown {
       "The acting agent does not have an active messaging identity",
       { code: "agent_identity_not_linked", identityId: err.identityId },
     );
-  }
-  if (err instanceof MessagingThreadLocked) {
-    return conflict("The issue thread is locked for further comments", {
-      code: "messaging_thread_locked",
-      threadId: err.threadId,
-    });
   }
   if (err instanceof MessagingBackendUnavailable) {
     if (err.code === "rate_limited") {

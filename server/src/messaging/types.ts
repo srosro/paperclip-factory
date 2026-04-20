@@ -1,23 +1,18 @@
-export type BackendKey = "slack" | "fake";
+export type BackendKey = "linear" | "fake";
 
-export type ChannelPurpose = "project" | "inbox" | "ad_hoc";
-
-export type MessageRefId = string;      // Paperclip UUID
-export type ExternalRef = string;       // backend-specific opaque ref
+export type MessageRefId = string;
+export type ExternalRef = string;
 
 export interface CapabilityFlags {
-  supportsThreads: boolean;
   supportsEditing: boolean;
   supportsReactions: boolean;
-  supportsButtons: boolean;
   supportsFileUpload: boolean;
-  supportsThreadLock: boolean;
+  supportsIssueRelations: boolean;
+  supportsLabels: boolean;
   requiresUserAuthPerIdentity: boolean;
 }
 
 export type AdapterCredential =
-  // bot_token: the adapter resolves the workspace bot token from its own
-  // deps; secretId is informational only and may be omitted.
   | { kind: "bot_token"; secretId?: string }
   | { kind: "user_token"; secretId: string }
   | { kind: "none" };
@@ -35,26 +30,90 @@ export interface AttachmentRef {
   sizeBytes: number;
 }
 
-export interface PostMessageArgs {
-  channelRef: ExternalRef;
-  threadRef?: ExternalRef;
-  authorIdentity: AuthorIdentity;
+export type AuthorKind = "agent" | "user" | "bot_system";
+
+export interface CreateIssueArgs {
+  externalTeamRef: ExternalRef;
+  externalProjectRef?: ExternalRef | null;
+  title: string;
+  description?: string | null;
+  assigneeExternalRef?: ExternalRef | null;
+  stateExternalRef?: ExternalRef | null;
+  priority?: number | null;
+  labelExternalRefs?: ExternalRef[];
+  author: AuthorIdentity;
+}
+
+export interface UpdateIssueArgs {
+  externalIssueRef: ExternalRef;
+  title?: string | null;
+  description?: string | null;
+  assigneeExternalRef?: ExternalRef | null;
+  stateExternalRef?: ExternalRef | null;
+  priority?: number | null;
+  labelExternalRefs?: ExternalRef[];
+  author: AuthorIdentity;
+}
+
+export interface IssueRef {
+  externalIssueRef: ExternalRef;
+  identifier: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface Issue {
+  externalIssueRef: ExternalRef;
+  identifier: string;
+  title: string;
+  description: string | null;
+  stateExternalRef: ExternalRef | null;
+  priority: number | null;
+  assigneeExternalRef: ExternalRef | null;
+  labelExternalRefs: ExternalRef[];
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface PostCommentArgs {
+  externalIssueRef: ExternalRef;
+  author: AuthorIdentity;
   body: string;
-  blocks?: unknown;
   attachments?: AttachmentRef[];
 }
 
-export interface CreateChannelArgs {
-  name: string;
-  purpose: ChannelPurpose;
-  purposeText?: string;
-  private?: boolean;
+export interface CommentRef {
+  externalCommentRef: ExternalRef;
+  createdAt: Date;
 }
 
-export interface CreateThreadArgs {
-  channelRef: ExternalRef;
-  parentBlocks: unknown;
-  fallbackText: string;
+export interface Comment {
+  externalCommentRef: ExternalRef;
+  externalIssueRef: ExternalRef;
+  body: string;
+  authorExternalRef: ExternalRef;
+  createdAt: Date;
+  editedAt?: Date;
+  deletedAt?: Date;
+  reactions?: Record<string, string[]>;
+}
+
+export interface PaginationOpts {
+  limit?: number;
+  afterExternalRef?: ExternalRef;
+}
+
+export interface UploadAttachmentArgs {
+  externalIssueRef: ExternalRef;
+  externalCommentRef?: ExternalRef;
+  by: AuthorIdentity;
+  filename: string;
+  contentType: string;
+  body: Buffer;
+}
+
+export interface AttachmentUploadResult {
+  externalAttachmentRef: ExternalRef | null;
 }
 
 export interface ProvisionAgentIdentityArgs {
@@ -68,112 +127,147 @@ export type ProvisionResult =
   | { kind: "completed"; externalUserRef: ExternalRef; credential: AdapterCredential }
   | { kind: "needs_user_action"; redirectUrl: string; stateToken: string };
 
-export interface Message {
-  refId: MessageRefId;
-  externalMessageRef: ExternalRef;
-  threadRef: ExternalRef;
-  body: string;
-  blocks?: unknown;
-  authorExternalRef: ExternalRef;
-  createdAt: Date;
-  editedAt?: Date;
-  deletedAt?: Date;
-  reactions?: Record<string, string[]>;
-}
-
-export interface IncomingFileRef {
-  id: string;
-  name: string;
-  mimetype: string;
-  urlPrivate: string;
-  size: number;
-  user?: string;
-}
-
 export type MessagingEvent =
   | {
-      kind: "message";
+      kind: "issue_created";
       externalEventId: string;
-      channelRef: ExternalRef;
-      threadRef?: ExternalRef;
-      messageRef: ExternalRef;
-      authorExternalRef: ExternalRef;
-      bodyRaw: string;
+      externalIssueRef: ExternalRef;
+      identifier: string;
+      assigneeExternalRef: ExternalRef | null;
       createdAt: Date;
-      files?: IncomingFileRef[];
     }
   | {
-      kind: "message_changed";
+      kind: "issue_updated";
       externalEventId: string;
-      messageRef: ExternalRef;
-      channelRef: ExternalRef;
+      externalIssueRef: ExternalRef;
+      changedFields: string[];
+      assigneeExternalRef?: ExternalRef | null;
+      stateExternalRef?: ExternalRef | null;
+      updatedAt: Date;
+    }
+  | {
+      kind: "issue_assignee_changed";
+      externalEventId: string;
+      externalIssueRef: ExternalRef;
+      newAssigneeExternalRef: ExternalRef | null;
+      updatedAt: Date;
+    }
+  | {
+      kind: "issue_removed";
+      externalEventId: string;
+      externalIssueRef: ExternalRef;
+      removedAt: Date;
+    }
+  | {
+      kind: "comment_created";
+      externalEventId: string;
+      externalIssueRef: ExternalRef;
+      externalCommentRef: ExternalRef;
+      authorExternalRef: ExternalRef;
+      bodyRaw: string;
+      mentionedExternalRefs: ExternalRef[];
+      createdAt: Date;
+    }
+  | {
+      kind: "comment_updated";
+      externalEventId: string;
+      externalCommentRef: ExternalRef;
+      externalIssueRef: ExternalRef;
       bodyRaw: string;
       editedAt: Date;
     }
   | {
-      kind: "message_deleted";
+      kind: "comment_deleted";
       externalEventId: string;
-      messageRef: ExternalRef;
-      channelRef: ExternalRef;
+      externalCommentRef: ExternalRef;
+      externalIssueRef: ExternalRef;
       deletedAt: Date;
     }
   | {
       kind: "reaction_added" | "reaction_removed";
       externalEventId: string;
-      messageRef: ExternalRef;
-      channelRef: ExternalRef;
+      externalCommentRef: ExternalRef;
+      externalIssueRef: ExternalRef;
       reactorExternalRef: ExternalRef;
       emoji: string;
       at: Date;
+    }
+  | {
+      kind: "labels_changed";
+      externalEventId: string;
+      externalIssueRef: ExternalRef;
+      addedExternalLabelRefs: ExternalRef[];
+      removedExternalLabelRefs: ExternalRef[];
+      updatedAt: Date;
+    }
+  | {
+      kind: "attachment_changed";
+      externalEventId: string;
+      externalIssueRef: ExternalRef;
+      externalAttachmentRef: ExternalRef;
+      action: "added" | "removed";
+      updatedAt: Date;
+    }
+  | {
+      kind: "project_changed";
+      externalEventId: string;
+      externalProjectRef: ExternalRef;
+      action: "created" | "updated" | "removed";
+      updatedAt: Date;
     };
 
-export interface MessagingAdapter {
+export interface IssueTrackerAdapter {
   readonly backendKey: BackendKey;
   readonly capabilities: CapabilityFlags;
 
-  // Channels / threads
-  createChannel(args: CreateChannelArgs): Promise<{ externalRef: ExternalRef; name: string }>;
-  archiveChannel(channelRef: ExternalRef): Promise<void>;
-  addChannelMember(channelRef: ExternalRef, identityRef: ExternalRef): Promise<void>;
-  removeChannelMember(channelRef: ExternalRef, identityRef: ExternalRef): Promise<void>;
-  createThread(args: CreateThreadArgs): Promise<{ threadRef: ExternalRef; parentMessageRef: ExternalRef }>;
-  lockThread(threadRef: ExternalRef): Promise<void>;
+  createIssue(args: CreateIssueArgs): Promise<IssueRef>;
+  updateIssue(args: UpdateIssueArgs): Promise<IssueRef>;
+  getIssue(externalIssueRef: ExternalRef): Promise<Issue | null>;
+  archiveIssue(externalIssueRef: ExternalRef): Promise<void>;
 
-  // Messages
-  postMessage(args: PostMessageArgs): Promise<{
-    messageRef: ExternalRef;
-    createdAt: Date;
-    slackFileIds?: string[];
-  }>;
-  editMessage(channelRef: ExternalRef, messageRef: ExternalRef, body: string, blocks?: unknown): Promise<void>;
-  deleteMessage(channelRef: ExternalRef, messageRef: ExternalRef, by: AuthorIdentity): Promise<void>;
-  getThreadMessages(channelRef: ExternalRef, threadRef: ExternalRef): Promise<Message[]>;
-  getMessage(channelRef: ExternalRef, messageRef: ExternalRef): Promise<Message | null>;
-  /**
-   * Optional: upload a file to a thread on behalf of an identity. Only
-   * adapters advertising `supportsFileUpload` implement this meaningfully.
-   * Returns the backend's file id so callers can persist it on the ref's
-   * metadata for later correlation.
-   */
-  uploadAttachmentToThread?(args: {
-    channelRef: ExternalRef;
-    threadRef: ExternalRef;
-    by: AuthorIdentity;
-    filename: string;
-    contentType: string;
-    body: Buffer;
-  }): Promise<{ slackFileId: string | null }>;
+  postComment(args: PostCommentArgs): Promise<CommentRef>;
+  editComment(externalCommentRef: ExternalRef, body: string): Promise<void>;
+  deleteComment(externalCommentRef: ExternalRef, by: AuthorIdentity): Promise<void>;
+  getComments(
+    externalIssueRef: ExternalRef,
+    opts?: PaginationOpts,
+  ): Promise<Comment[]>;
+  getComment(externalCommentRef: ExternalRef): Promise<Comment | null>;
 
-  // Identities
+  ensureLabel(
+    companyId: string,
+    name: string,
+    color?: string | null,
+  ): Promise<ExternalRef>;
+  setIssueLabels(
+    externalIssueRef: ExternalRef,
+    externalLabelRefs: ExternalRef[],
+  ): Promise<void>;
+
+  uploadAttachment(args: UploadAttachmentArgs): Promise<AttachmentUploadResult>;
+
   provisionAgentIdentity(args: ProvisionAgentIdentityArgs): Promise<ProvisionResult>;
-  resolveExternalUser(externalRef: ExternalRef): Promise<{ displayName?: string; email?: string } | null>;
+  resolveExternalUser(externalRef: ExternalRef): Promise<{
+    displayName?: string;
+    email?: string;
+  } | null>;
 
-  // Events (inbound, normalized)
   normalizeEvent(raw: unknown): MessagingEvent | null;
 }
 
+/**
+ * Deprecated alias — will be removed once all call sites are migrated
+ * away. Prefer `IssueTrackerAdapter`. Stays only as a transitional export
+ * for one commit; removed in Task 10.
+ */
+export type MessagingAdapter = IssueTrackerAdapter;
+
 export class MessagingBackendUnavailable extends Error {
-  constructor(message: string, readonly code: string, readonly retryAfterSec?: number) {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly retryAfterSec?: number,
+  ) {
     super(message);
     this.name = "MessagingBackendUnavailable";
   }
@@ -192,18 +286,3 @@ export class MessagingNotConfigured extends Error {
     this.name = "MessagingNotConfigured";
   }
 }
-
-export class MessagingThreadLocked extends Error {
-  constructor(readonly threadId: string) {
-    super(`messaging thread ${threadId} is locked`);
-    this.name = "MessagingThreadLocked";
-  }
-}
-
-/**
- * IssueTrackerAdapter is the target name for this interface post-refactor.
- * During the refactor, it's an alias so callers can migrate incrementally.
- * After the refactor completes (Task 10), MessagingAdapter is removed and
- * only IssueTrackerAdapter remains, with the redesigned method surface.
- */
-export type IssueTrackerAdapter = MessagingAdapter;
