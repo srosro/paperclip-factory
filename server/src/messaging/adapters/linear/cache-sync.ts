@@ -6,10 +6,16 @@ import {
 import type { Db } from "../../router.js";
 import type { MessagingEvent } from "../../types.js";
 import { findLinearLabelByExternalRef } from "./label-sync.js";
+import {
+  invertWorkflowStateMap,
+  mapLinearPriorityToPaperclip,
+} from "./workflow-state-map.js";
+import type { WorkflowStateMap } from "./workflow-state-map.js";
 
 export interface CacheSyncDeps {
   db: Db;
   companyId: string;
+  workflowStateMap: WorkflowStateMap | null;
 }
 
 export async function syncFromLinearEvent(
@@ -70,9 +76,28 @@ async function updateIssueFromEvent(
     .where(eq(issuesTable.linearIssueId, event.externalIssueRef))
     .limit(1);
   if (!existing) return;
+
+  const patch: Record<string, unknown> = { updatedAt: new Date() };
+
+  if ("title" in event && event.title != null) {
+    patch.title = event.title;
+  }
+  if ("description" in event && event.description !== undefined) {
+    patch.description = event.description;
+  }
+  if ("priority" in event && event.priority != null && deps.workflowStateMap) {
+    const mapped = mapLinearPriorityToPaperclip(event.priority as number);
+    if (mapped !== null) patch.priority = mapped;
+  }
+  if ("stateExternalRef" in event && event.stateExternalRef != null && deps.workflowStateMap) {
+    const inverted = invertWorkflowStateMap(deps.workflowStateMap);
+    const status = inverted[event.stateExternalRef as string];
+    if (status !== undefined) patch.status = status;
+  }
+
   await deps.db
     .update(issuesTable)
-    .set({ updatedAt: new Date() })
+    .set(patch)
     .where(eq(issuesTable.id, existing.id));
 }
 

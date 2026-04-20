@@ -15,6 +15,7 @@ import type { StorageService } from "../storage/types.js";
 import { createFakeAdapter } from "./adapters/fake/adapter.js";
 import { createLinearAdapter } from "./adapters/linear/adapter.js";
 import { syncFromLinearEvent } from "./adapters/linear/cache-sync.js";
+import type { WorkflowStateMap } from "./adapters/linear/workflow-state-map.js";
 import { resolveLinearMentions } from "./adapters/linear/mention-parser.js";
 import { selfOriginationTracker } from "./adapters/linear/self-origination.js";
 
@@ -232,8 +233,14 @@ function buildLinearContext(
     workspaceInstallId: install.id,
     onMessageCreated: bootstrap.onMessageCreated,
     resolveMentions: (body) => resolveLinearMentions(bootstrap.db, companyId, body),
-    syncFromEvent: (event) =>
-      syncFromLinearEvent({ db: bootstrap.db, companyId }, event),
+    syncFromEvent: (event) => {
+      const rawMap = (install.metadata as Record<string, unknown> | null)
+        ?.linearWorkflowStateMap as WorkflowStateMap | null | undefined;
+      return syncFromLinearEvent(
+        { db: bootstrap.db, companyId, workflowStateMap: rawMap ?? null },
+        event,
+      );
+    },
     isSelfOriginated: (event: MessagingEvent) => {
       const ref =
         "externalCommentRef" in event && event.externalCommentRef

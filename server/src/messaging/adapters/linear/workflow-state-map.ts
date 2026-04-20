@@ -124,3 +124,34 @@ export function mapLinearStateTypeToPaperclipStatus(
       return null;
   }
 }
+
+/**
+ * Returns a map from Linear state ID → PaperclipStatus, built by inverting
+ * the complete workflow state map. Returns an empty map if the map is incomplete.
+ */
+export function invertWorkflowStateMap(
+  map: WorkflowStateMap,
+): Record<string, PaperclipStatus> {
+  if (map.kind !== "complete") return {};
+  const out: Record<string, PaperclipStatus> = {};
+  for (const [status, stateId] of Object.entries(map.byStatus) as [PaperclipStatus, string][]) {
+    out[stateId] = status;
+  }
+  return out;
+}
+
+/**
+ * Maps a Linear numeric priority (1=urgent, 2=high, 3=medium, 4=low, 0=no priority)
+ * to a Paperclip priority string.
+ */
+export function mapLinearPriorityToPaperclip(
+  priority: number,
+): "critical" | "high" | "medium" | "low" | null {
+  switch (priority) {
+    case 1: return "critical";
+    case 2: return "high";
+    case 3: return "medium";
+    case 4: return "low";
+    default: return null;
+  }
+}
