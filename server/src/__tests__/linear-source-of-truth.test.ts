@@ -65,6 +65,22 @@ describeIf("cache-sync full field sync", () => {
 
   afterAll(async () => { await tempDb?.cleanup(); });
 
+  it("resolveMessagingContext returns 'disabled' for a company with no messaging config", async () => {
+    const [company] = await db.insert(companies)
+      .values({ name: "No Linear Co", issuePrefix: "NLC" })
+      .returning();
+
+    const { resolveMessagingContext, initMessaging, resetMessagingForTests } = await import("../messaging/context.js");
+    resetMessagingForTests();
+    initMessaging({ db });
+    try {
+      const ctx = await resolveMessagingContext(company!.id);
+      expect(ctx.status).toBe("disabled");
+    } finally {
+      resetMessagingForTests();
+    }
+  });
+
   it("syncs title, status, and priority from issue_updated event", async () => {
     const [company] = await db.insert(companies)
       .values({ name: "Test Co", issuePrefix: "TST" })

@@ -46,7 +46,7 @@ import {
   workProductService,
 } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
-import { conflict, forbidden, HttpError, notFound, unauthorized } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound, translateMessagingError, unauthorized } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
@@ -65,7 +65,9 @@ import {
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
 } from "../services/issue-execution-policy.js";
-import { resolveMessagingContext } from "../messaging/index.js";
+import { requireMessagingContext, resolveMessagingContext } from "../messaging/index.js";
+import { mapPaperclipPriorityToLinearPriority } from "../messaging/adapters/linear/workflow-state-map.js";
+import type { WorkflowStateMap } from "../messaging/adapters/linear/workflow-state-map.js";
 import { handleMessageCreatedSideEffects } from "../messaging/side-effects.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
@@ -1336,6 +1338,10 @@ export function issueRoutes(
       await assertCanAssignTasks(req, companyId);
     }
 
+    const messagingCtx = await requireMessagingContext(companyId).catch((err) => {
+      throw translateMessagingError(err);
+    });
+
     const actor = getActorInfo(req);
     const executionPolicy = normalizeIssueExecutionPolicy(req.body.executionPolicy);
     const issue = await svc.create(companyId, {
@@ -1344,6 +1350,13 @@ export function issueRoutes(
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
     });
+
+    try {
+      await messagingCtx.router.syncIssueToExternal(issue.id);
+    } catch (syncErr) {
+      await svc.remove(issue.id).catch(() => {});
+      throw translateMessagingError(syncErr);
+    }
 
     await logActivity(db, {
       companyId,
@@ -1963,6 +1976,34 @@ export function issueRoutes(
           .catch((err) => logger.warn({ err, issueId: issue.id, agentId }, "failed to wake agent on issue update"));
       }
     })();
+
+    // Best-effort sync to Linear — fire and forget.
+    if (issue.linearIssueId) {
+      const patchCompanyId = issue.companyId;
+      resolveMessagingContext(patchCompanyId).then((patchCtx) => {
+        if (patchCtx.status !== "ready") return;
+        const workflowMap = (patchCtx.workspaceInstall?.metadata as Record<string, unknown> | null)
+          ?.linearWorkflowStateMap as WorkflowStateMap | null | undefined;
+        const syncArgs: import("../messaging/router.js").RouterUpdateIssueArgs = {
+          companyId: patchCompanyId,
+          issueId: issue.id,
+          authorKind: "bot_system",
+        };
+        if (req.body.title !== undefined) syncArgs.title = req.body.title as string;
+        if (req.body.description !== undefined) syncArgs.description = req.body.description as string | null;
+        if (req.body.priority !== undefined) {
+          syncArgs.priority = mapPaperclipPriorityToLinearPriority(
+            req.body.priority as "critical" | "high" | "medium" | "low" | null,
+          );
+        }
+        if (req.body.status !== undefined && workflowMap?.kind === "complete") {
+          syncArgs.status = workflowMap.byStatus[req.body.status as keyof typeof workflowMap.byStatus] ?? null;
+        }
+        return patchCtx.router.updateIssue(syncArgs);
+      }).catch((err: unknown) => {
+        logger.warn({ err, issueId: issue.id }, "[issues] best-effort Linear sync failed");
+      });
+    }
 
     res.json({ ...issueResponse, comment });
   });
