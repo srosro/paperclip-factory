@@ -11,6 +11,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { EmptyState } from "../components/EmptyState";
 import { IssuesList } from "../components/IssuesList";
+import { LinearRequiredGate } from "../components/LinearRequiredGate";
 import { CircleDot } from "lucide-react";
 
 export function buildIssuesSearchUrl(currentHref: string, search: string): string | null {
@@ -107,21 +108,23 @@ export function Issues() {
   }
 
   return (
-    <IssuesList
-      issues={issues ?? []}
-      isLoading={isLoading}
-      error={error as Error | null}
-      agents={agents}
-      projects={projects}
-      liveIssueIds={liveIssueIds}
-      viewStateKey="paperclip:issues-view"
-      issueLinkState={issueLinkState}
-      initialAssignees={searchParams.get("assignee") ? [searchParams.get("assignee")!] : undefined}
-      initialSearch={initialSearch}
-      onSearchChange={handleSearchChange}
-      enableRoutineVisibilityFilter
-      onUpdateIssue={(id, data) => updateIssue.mutate({ id, data })}
-      searchFilters={participantAgentId ? { participantAgentId } : undefined}
-    />
+    <LinearRequiredGate>
+      <IssuesList
+        issues={issues ?? []}
+        isLoading={isLoading}
+        error={error as Error | null}
+        agents={agents}
+        projects={projects}
+        liveIssueIds={liveIssueIds}
+        viewStateKey="paperclip:issues-view"
+        issueLinkState={issueLinkState}
+        initialAssignees={searchParams.get("assignee") ? [searchParams.get("assignee")!] : undefined}
+        initialSearch={initialSearch}
+        onSearchChange={handleSearchChange}
+        enableRoutineVisibilityFilter
+        onUpdateIssue={(id, data) => updateIssue.mutate({ id, data })}
+        searchFilters={participantAgentId ? { participantAgentId } : undefined}
+      />
+    </LinearRequiredGate>
   );
 }

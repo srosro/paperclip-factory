@@ -56,6 +56,7 @@ import {
 import { removeLiveRunById, upsertInterruptedRun } from "../lib/optimistic-issue-runs";
 import { useProjectOrder } from "../hooks/useProjectOrder";
 import { relativeTime, cn, formatTokens, visibleRunCostUsd } from "../lib/utils";
+import { LinearRequiredGate } from "../components/LinearRequiredGate";
 import { ApprovalCard } from "../components/ApprovalCard";
 import { InlineEditor } from "../components/InlineEditor";
 import { IssueChatThread, type IssueChatComposerHandle } from "../components/IssueChatThread";
@@ -2166,6 +2167,7 @@ export function IssueDetail() {
   );
 
   return (
+    <LinearRequiredGate>
     <div className="max-w-2xl space-y-6">
       {/* Parent chain breadcrumb */}
       {ancestors.length > 0 && (
@@ -2709,5 +2711,6 @@ export function IssueDetail() {
       </Sheet>
       <ScrollToBottom />
     </div>
+    </LinearRequiredGate>
   );
 }
