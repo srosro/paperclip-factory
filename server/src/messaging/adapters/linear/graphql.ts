@@ -175,3 +175,77 @@ export const MUTATION_ATTACHMENT_CREATE = `
     }
   }
 `;
+
+export const QUERY_ISSUES = `
+  query Issues(
+    $teamId: ID
+    $assigneeId: ID
+    $stateId: ID
+    $first: Int
+    $after: String
+  ) {
+    issues(
+      filter: {
+        team: { id: { eq: $teamId } }
+        assignee: { id: { eq: $assigneeId } }
+        state: { id: { eq: $stateId } }
+      }
+      first: $first
+      after: $after
+      orderBy: updatedAt
+    ) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state { id name type }
+        assignee { id name email }
+        labels { nodes { id name color } }
+        createdAt
+        updatedAt
+      }
+    }
+  }
+`;
+
+export const QUERY_ISSUE_SEARCH = `
+  query IssueSearch($teamId: ID, $query: String!, $first: Int) {
+    issueSearch(
+      query: $query
+      filter: { team: { id: { eq: $teamId } } }
+      first: $first
+    ) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state { id name type }
+        assignee { id name email }
+        labels { nodes { id name color } }
+        createdAt
+        updatedAt
+      }
+    }
+  }
+`;
+
+export const QUERY_ISSUE_BY_IDENTIFIER = `
+  query IssueByIdentifier($identifier: String!) {
+    issueByIdentifier(identifier: $identifier) {
+      id
+      identifier
+      title
+      description
+      priority
+      state { id name type }
+      assignee { id name email }
+      labels { nodes { id name color } }
+      createdAt
+      updatedAt
+    }
+  }
+`;

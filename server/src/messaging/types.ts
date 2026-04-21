@@ -245,6 +245,25 @@ export interface IssueTrackerAdapter {
   ): Promise<Comment[]>;
   getComment(externalCommentRef: ExternalRef): Promise<Comment | null>;
 
+  /** List issues, optionally filtered by team, assignee, state. */
+  listIssues(opts: {
+    externalTeamRef?: ExternalRef;
+    assigneeExternalRef?: ExternalRef | null;
+    stateExternalRef?: ExternalRef | null;
+    limit?: number;
+    afterExternalRef?: ExternalRef;
+  }): Promise<Issue[]>;
+
+  /** Full-text search within a team's issues. */
+  searchIssues(opts: {
+    externalTeamRef?: ExternalRef;
+    query: string;
+    limit?: number;
+  }): Promise<Issue[]>;
+
+  /** Resolve an identifier like "PLO-5" to a full Issue, or null if not found. */
+  getIssueByIdentifier(identifier: string): Promise<Issue | null>;
+
   ensureLabel(
     companyId: string,
     name: string,

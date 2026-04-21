@@ -31,6 +31,9 @@ import {
   QUERY_COMMENT,
   QUERY_COMMENTS,
   QUERY_ISSUE,
+  QUERY_ISSUE_BY_IDENTIFIER,
+  QUERY_ISSUE_SEARCH,
+  QUERY_ISSUES,
   QUERY_TEAM_LABELS,
 } from "./graphql.js";
 import type { LinearCommentRaw, LinearIssueRaw } from "./types.js";
@@ -251,6 +254,40 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
         { id: externalCommentRef },
       );
       return res.comment ? rawToComment(res.comment) : null;
+    },
+
+    async listIssues(opts) {
+      const client = await workspaceClient();
+      const res = await client.request<{
+        issues: { nodes: LinearIssueRaw[] };
+      }>(QUERY_ISSUES, {
+        teamId: opts.externalTeamRef ?? null,
+        assigneeId: opts.assigneeExternalRef ?? null,
+        stateId: opts.stateExternalRef ?? null,
+        first: opts.limit ?? 50,
+        after: opts.afterExternalRef ?? null,
+      });
+      return (res.issues.nodes ?? []).map(rawToIssue);
+    },
+
+    async searchIssues(opts) {
+      const client = await workspaceClient();
+      const res = await client.request<{
+        issueSearch: { nodes: LinearIssueRaw[] };
+      }>(QUERY_ISSUE_SEARCH, {
+        teamId: opts.externalTeamRef ?? null,
+        query: opts.query,
+        first: opts.limit ?? 50,
+      });
+      return (res.issueSearch.nodes ?? []).map(rawToIssue);
+    },
+
+    async getIssueByIdentifier(identifier) {
+      const client = await workspaceClient();
+      const res = await client.request<{
+        issueByIdentifier: LinearIssueRaw | null;
+      }>(QUERY_ISSUE_BY_IDENTIFIER, { identifier });
+      return res.issueByIdentifier ? rawToIssue(res.issueByIdentifier) : null;
     },
 
     async ensureLabel(

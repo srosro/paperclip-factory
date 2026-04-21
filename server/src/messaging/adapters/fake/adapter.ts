@@ -223,6 +223,39 @@ export function createFakeAdapter(): IssueTrackerAdapter & {
       return commentsByRef.get(externalCommentRef) ?? null;
     },
 
+    async listIssues(opts) {
+      let results = [...issuesByRef.values()];
+      if (opts.assigneeExternalRef !== undefined) {
+        results = results.filter(
+          (i) => i.assigneeExternalRef === opts.assigneeExternalRef,
+        );
+      }
+      if (opts.stateExternalRef !== undefined) {
+        results = results.filter(
+          (i) => i.stateExternalRef === opts.stateExternalRef,
+        );
+      }
+      const limit = opts.limit ?? 50;
+      return results.slice(0, limit).map((i) => ({ ...i }));
+    },
+
+    async searchIssues(opts) {
+      const q = opts.query.toLowerCase();
+      const results = [...issuesByRef.values()].filter(
+        (i) =>
+          i.title.toLowerCase().includes(q) ||
+          (i.description ?? "").toLowerCase().includes(q),
+      );
+      return results.slice(0, opts.limit ?? 50).map((i) => ({ ...i }));
+    },
+
+    async getIssueByIdentifier(identifier) {
+      const found = [...issuesByRef.values()].find(
+        (i) => i.identifier === identifier,
+      );
+      return found ? { ...found } : null;
+    },
+
     async ensureLabel(
       _companyId: string,
       name: string,
