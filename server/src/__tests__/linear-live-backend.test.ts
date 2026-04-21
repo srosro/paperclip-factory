@@ -8,7 +8,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { createLinearBackedIssueService } from "../services/linear-backed-issue-service.js";
 
-describe("IssueTrackerAdapter — list/search/getByIdentifier", () => {
+describe("FakeAdapter — list/search/getByIdentifier", () => {
   it("listIssues returns issues filtered by assignee", async () => {
     const adapter = createFakeAdapter();
     const { externalIssueRef: ref1 } = await adapter.createIssue({
@@ -184,5 +184,47 @@ describeIf("LinearBackedIssueService", () => {
 
     expect(updated!.title).toBe("Updated");
     expect(updated!.assigneeAgentId).toBe(ag.id);
+  });
+
+  it("remove: archives in adapter and makes getById return null", async () => {
+    const adapter = createFakeAdapter();
+    const co = await makeCompany();
+    const svc = createLinearBackedIssueService({
+      adapter,
+      db,
+      companyId: co.id,
+      externalTeamRef: "team1",
+    });
+
+    const created = await svc.create({ title: "To be removed" });
+    expect(await svc.getById(created.id)).not.toBeNull();
+
+    await svc.remove(created.id);
+
+    expect(await svc.getById(created.id)).toBeNull();
+  });
+
+  it("getByIdentifier: falls back to adapter when no sidecar row exists", async () => {
+    const adapter = createFakeAdapter();
+    const co = await makeCompany();
+    const svc = createLinearBackedIssueService({
+      adapter,
+      db,
+      companyId: co.id,
+      externalTeamRef: "team1",
+    });
+
+    // Insert directly into the fake adapter, bypassing svc.create() so no sidecar row is created
+    await adapter.createIssue({
+      externalTeamRef: "team1",
+      title: "Linear-only issue",
+      author: { externalUserRef: "u1", credential: { kind: "none" } },
+    });
+
+    const result = await svc.getByIdentifier("FAKE-1");
+    expect(result).not.toBeNull();
+    expect(result!.title).toBe("Linear-only issue");
+    // No sidecar row exists, so id is undefined/null
+    expect(result!.id).toBeFalsy();
   });
 });

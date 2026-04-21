@@ -73,13 +73,17 @@ export function createLinearBackedIssueService(deps: LinearBackedIssueServiceDep
   const { adapter, db, companyId, externalTeamRef } = deps;
   const systemRef = deps.systemUserRef ?? "system";
 
+  // sidecar is nullable only at call sites where the issue may not yet have a sidecar
+  // (getByLinearId, getByIdentifier fallback, list without assigneeAgentId filter).
+  // Call sites that require a sidecar (create, getById, update) throw before calling this.
   function mergeSidecar(
     linearIssue: Issue,
     sidecar: typeof issuesTable.$inferSelect | null,
   ): LinearBackedIssue {
     return {
       ...linearIssue,
-      id: sidecar?.id ?? "",
+      // id is null when no sidecar exists (issue lives only in Linear, not in Paperclip yet)
+      id: sidecar?.id as string,
       companyId,
       linearIssueId: sidecar?.linearIssueId ?? linearIssue.externalIssueRef,
       linearIssueIdentifier: sidecar?.linearIssueIdentifier ?? linearIssue.identifier,
@@ -125,6 +129,9 @@ export function createLinearBackedIssueService(deps: LinearBackedIssueServiceDep
         author: systemAuthor(adapter.backendKey, systemRef),
       });
 
+      const linearIssue = await adapter.getIssue(ref.externalIssueRef);
+      if (!linearIssue) throw new Error(`create: adapter returned null for newly created issue ${ref.externalIssueRef}`);
+
       const [sidecar] = await db
         .insert(issuesTable)
         .values({
@@ -139,14 +146,15 @@ export function createLinearBackedIssueService(deps: LinearBackedIssueServiceDep
           parentId: args.parentId ?? null,
         })
         .returning();
+      if (!sidecar) throw new Error("create: insert returned no row");
 
-      const linearIssue = await adapter.getIssue(ref.externalIssueRef);
-      return mergeSidecar(linearIssue!, sidecar!);
+      return mergeSidecar(linearIssue, sidecar);
     },
 
     async getById(id: string): Promise<LinearBackedIssue | null> {
       const sidecar = await getSidecarById(id);
-      if (!sidecar?.linearIssueId) return null;
+      if (!sidecar) return null;
+      if (!sidecar.linearIssueId) throw new Error(`getById: sidecar ${id} has no linearIssueId`);
       const linearIssue = await adapter.getIssue(sidecar.linearIssueId);
       if (!linearIssue) return null;
       return mergeSidecar(linearIssue, sidecar);
@@ -194,6 +202,7 @@ export function createLinearBackedIssueService(deps: LinearBackedIssueServiceDep
           )
           .limit(limit);
 
+        // N round-trips to Linear; optimize later via listIssues(assigneeExternalRef) when agent's Linear user ref is known
         const linearIssues = await Promise.all(
           sidecars
             .filter((s) => s.linearIssueId)
@@ -261,9 +270,9 @@ export function createLinearBackedIssueService(deps: LinearBackedIssueServiceDep
 
     async remove(id: string): Promise<void> {
       const sidecar = await getSidecarById(id);
-      if (sidecar?.linearIssueId) {
-        await adapter.archiveIssue(sidecar.linearIssueId);
-      }
+      if (!sidecar) throw new Error(`remove: no sidecar for id ${id}`);
+      if (!sidecar.linearIssueId) throw new Error(`remove: sidecar ${id} has no linearIssueId`);
+      await adapter.archiveIssue(sidecar.linearIssueId);
       await db.delete(issuesTable).where(eq(issuesTable.id, id));
     },
 
