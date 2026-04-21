@@ -279,10 +279,13 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
 
     async searchIssues(opts) {
       const client = await workspaceClient();
+      const filter: Record<string, unknown> = {};
+      if (opts.externalTeamRef != null) filter.team = { id: { eq: opts.externalTeamRef } };
+
       const res = await client.request<{
         issueSearch: { nodes: LinearIssueRaw[] };
       }>(QUERY_ISSUE_SEARCH, {
-        teamId: opts.externalTeamRef ?? null,
+        filter: Object.keys(filter).length > 0 ? filter : undefined,
         query: opts.query,
         first: opts.limit ?? 50,
       });

@@ -190,6 +190,7 @@ export const QUERY_ISSUES = `
         title
         description
         priority
+        team { id key }
         state { id name type }
         assignee { id name email }
         labels { nodes { id name color } }
@@ -201,10 +202,10 @@ export const QUERY_ISSUES = `
 `;
 
 export const QUERY_ISSUE_SEARCH = `
-  query IssueSearch($teamId: ID, $query: String!, $first: Int) {
+  query IssueSearch($filter: IssueFilter, $query: String!, $first: Int) {
     issueSearch(
       query: $query
-      filter: { team: { id: { eq: $teamId } } }
+      filter: $filter
       first: $first
     ) {
       nodes {
@@ -213,6 +214,7 @@ export const QUERY_ISSUE_SEARCH = `
         title
         description
         priority
+        team { id key }
         state { id name type }
         assignee { id name email }
         labels { nodes { id name color } }
@@ -231,6 +233,7 @@ export const QUERY_ISSUE_BY_IDENTIFIER = `
       title
       description
       priority
+      team { id key }
       state { id name type }
       assignee { id name email }
       labels { nodes { id name color } }
