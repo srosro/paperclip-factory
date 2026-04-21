@@ -449,6 +449,13 @@
       "when": 1776694382467,
       "tag": "0063_fearless_sentry",
       "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1776811238264,
+      "tag": "0064_skinny_the_fallen",
+      "breakpoints": true
     }
   ]
 }
