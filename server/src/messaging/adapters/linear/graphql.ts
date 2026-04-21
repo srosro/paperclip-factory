@@ -177,19 +177,9 @@ export const MUTATION_ATTACHMENT_CREATE = `
 `;
 
 export const QUERY_ISSUES = `
-  query Issues(
-    $teamId: ID
-    $assigneeId: ID
-    $stateId: ID
-    $first: Int
-    $after: String
-  ) {
+  query Issues($filter: IssueFilter, $first: Int, $after: String) {
     issues(
-      filter: {
-        team: { id: { eq: $teamId } }
-        assignee: { id: { eq: $assigneeId } }
-        state: { id: { eq: $stateId } }
-      }
+      filter: $filter
       first: $first
       after: $after
       orderBy: updatedAt

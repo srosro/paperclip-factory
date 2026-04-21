@@ -258,12 +258,19 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
 
     async listIssues(opts) {
       const client = await workspaceClient();
+      const filter: Record<string, unknown> = {};
+      if (opts.externalTeamRef != null) filter.team = { id: { eq: opts.externalTeamRef } };
+      if (opts.assigneeExternalRef !== undefined) {
+        filter.assignee = opts.assigneeExternalRef === null
+          ? { null: true }
+          : { id: { eq: opts.assigneeExternalRef } };
+      }
+      if (opts.stateExternalRef != null) filter.state = { id: { eq: opts.stateExternalRef } };
+
       const res = await client.request<{
         issues: { nodes: LinearIssueRaw[] };
       }>(QUERY_ISSUES, {
-        teamId: opts.externalTeamRef ?? null,
-        assigneeId: opts.assigneeExternalRef ?? null,
-        stateId: opts.stateExternalRef ?? null,
+        filter: Object.keys(filter).length > 0 ? filter : undefined,
         first: opts.limit ?? 50,
         after: opts.afterExternalRef ?? null,
       });
