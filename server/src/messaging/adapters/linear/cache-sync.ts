@@ -53,12 +53,15 @@ async function upsertIssueFromEvent(
     .where(eq(issuesTable.linearIssueId, event.externalIssueRef))
     .limit(1);
   if (existing) return;
+  const numericSuffix = event.identifier.match(/-(\d+)$/);
+  const issueNumber = numericSuffix ? parseInt(numericSuffix[1], 10) : null;
   await deps.db.insert(issuesTable).values({
     companyId: deps.companyId,
     title: event.title ?? "(syncing from Linear)",
     identifier: event.identifier,
     linearIssueId: event.externalIssueRef,
     linearIssueIdentifier: event.identifier,
+    issueNumber,
     status: "todo",
   });
 }

@@ -46,7 +46,7 @@ export interface LinearCommentRaw {
   id: string;
   body: string;
   user?: { id: string; name: string } | null;
-  issue: { id: string; identifier: string };
+  issue?: { id: string; identifier: string } | null;
   createdAt: string;
   updatedAt: string;
   editedAt?: string | null;

@@ -80,10 +80,10 @@ function rawToIssue(issue: LinearIssueRaw): Issue {
   };
 }
 
-function rawToComment(raw: LinearCommentRaw): Comment {
+function rawToComment(raw: LinearCommentRaw, fallbackIssueRef?: string): Comment {
   return {
     externalCommentRef: raw.id,
-    externalIssueRef: raw.issue.id,
+    externalIssueRef: raw.issue?.id ?? fallbackIssueRef ?? "",
     body: raw.body,
     authorExternalRef: raw.user?.id ?? "",
     createdAt: new Date(raw.createdAt),
@@ -240,7 +240,7 @@ export function createLinearAdapter(deps: LinearAdapterDeps): IssueTrackerAdapte
       });
       const nodes = res.issue?.comments.nodes ?? [];
       return nodes
-        .map(rawToComment)
+        .map((n) => rawToComment(n, externalIssueRef))
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
     },
 
