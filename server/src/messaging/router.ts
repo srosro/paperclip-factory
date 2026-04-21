@@ -5,6 +5,7 @@ import type {
   AuthorKind,
   BackendKey,
   ExternalRef,
+  Issue,
   IssueTrackerAdapter,
 } from "./types.js";
 import { MessagingIdentityNotActive } from "./types.js";
@@ -98,6 +99,17 @@ export interface IssueTrackerRouter {
    * Returns the external ref (existing or newly created).
    */
   syncIssueToExternal(issueId: string): Promise<{ externalIssueRef: string; identifier: string }>;
+  listIssues(opts: {
+    externalTeamRef?: ExternalRef;
+    assigneeExternalRef?: ExternalRef | null;
+    limit?: number;
+  }): Promise<Issue[]>;
+  searchIssues(opts: {
+    externalTeamRef?: ExternalRef;
+    query: string;
+    limit?: number;
+  }): Promise<Issue[]>;
+  getIssueByIdentifier(identifier: string): Promise<Issue | null>;
 }
 
 function buildCredential(row: { authBlobSecretId: string | null }) {
@@ -401,6 +413,18 @@ export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
           deletedAt: r.deletedAt,
           suppressedForWake: r.suppressedForWake,
         }));
+    },
+
+    async listIssues(opts) {
+      return adapter.listIssues(opts);
+    },
+
+    async searchIssues(opts) {
+      return adapter.searchIssues(opts);
+    },
+
+    async getIssueByIdentifier(identifier) {
+      return adapter.getIssueByIdentifier(identifier);
     },
   };
 
