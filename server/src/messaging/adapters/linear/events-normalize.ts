@@ -97,6 +97,7 @@ function normalizeIssue(
       externalEventId: eventId,
       externalIssueRef: data.id,
       identifier: data.identifier,
+      title: data.title ?? null,
       assigneeExternalRef: data.assignee?.id ?? null,
       createdAt: at,
     };

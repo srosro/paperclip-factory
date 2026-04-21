@@ -85,6 +85,7 @@ export function createFakeAdapter(): IssueTrackerAdapter & {
         externalEventId: nextEventId(),
         externalIssueRef: ref,
         identifier,
+        title: issue.title,
         assigneeExternalRef: issue.assigneeExternalRef,
         createdAt: now,
       });

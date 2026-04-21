@@ -55,7 +55,7 @@ async function upsertIssueFromEvent(
   if (existing) return;
   await deps.db.insert(issuesTable).values({
     companyId: deps.companyId,
-    title: "(syncing from Linear)",
+    title: event.title ?? "(syncing from Linear)",
     identifier: event.identifier,
     linearIssueId: event.externalIssueRef,
     linearIssueIdentifier: event.identifier,

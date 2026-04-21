@@ -140,6 +140,7 @@ export type MessagingEvent =
       externalEventId: string;
       externalIssueRef: ExternalRef;
       identifier: string;
+      title: string | null;
       assigneeExternalRef: ExternalRef | null;
       createdAt: Date;
     }
