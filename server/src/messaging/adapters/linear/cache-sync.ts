@@ -9,7 +9,6 @@ import { findLinearLabelByExternalRef } from "./label-sync.js";
 import {
   type WorkflowStateMap,
   invertWorkflowStateMap,
-  mapLinearPriorityToPaperclip,
 } from "./workflow-state-map.js";
 
 export interface CacheSyncDeps {
@@ -53,16 +52,10 @@ async function upsertIssueFromEvent(
     .where(eq(issuesTable.linearIssueId, event.externalIssueRef))
     .limit(1);
   if (existing) return;
-  const numericSuffix = event.identifier.match(/-(\d+)$/);
-  const issueNumber = numericSuffix ? parseInt(numericSuffix[1], 10) : null;
   await deps.db.insert(issuesTable).values({
     companyId: deps.companyId,
-    title: event.title ?? "(syncing from Linear)",
-    identifier: event.identifier,
     linearIssueId: event.externalIssueRef,
     linearIssueIdentifier: event.identifier,
-    issueNumber,
-    status: "todo",
   });
 }
 
@@ -84,15 +77,13 @@ async function updateIssueFromEvent(
     updatedAt: new Date(),
   };
   if (event.kind === "issue_updated") {
-    if (event.title != null) patch.title = event.title;
-    if (event.description !== undefined) patch.description = event.description;
-    if (event.priority != null) {
-      const mapped = mapLinearPriorityToPaperclip(event.priority);
-      if (mapped !== null) patch.priority = mapped;
-    }
+    // title/description/priority/status columns dropped in Task 3 — Linear is now source of truth.
+    // Status side effects (startedAt/completedAt/cancelledAt) will be handled by Task 7+.
     if (event.stateExternalRef != null && deps.workflowStateMap) {
       const status = invertWorkflowStateMap(deps.workflowStateMap)[event.stateExternalRef];
-      if (status !== undefined) patch.status = status;
+      if (status === "done") patch.completedAt = new Date();
+      else if (status === "cancelled") patch.cancelledAt = new Date();
+      else if (status === "in_progress") patch.startedAt = new Date();
     }
   }
 
@@ -108,7 +99,7 @@ async function markIssueCancelled(
 ): Promise<void> {
   await deps.db
     .update(issuesTable)
-    .set({ status: "cancelled", updatedAt: new Date() })
+    .set({ cancelledAt: new Date(), updatedAt: new Date() })
     .where(eq(issuesTable.linearIssueId, externalIssueRef));
 }
 

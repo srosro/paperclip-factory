@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from "express";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import {
   agents as agentsTable,
   issueCommentRefs,
@@ -157,9 +157,16 @@ export function messagingAdminRoutes(db: Db): Router {
         .select({
           id: issuesTable.id,
           companyId: issuesTable.companyId,
-          identifier: issuesTable.identifier,
-          title: issuesTable.title,
-          status: issuesTable.status,
+          identifier: issuesTable.linearIssueIdentifier,
+          title: sql<string>`''`,
+          status: sql<string>`
+            CASE
+              WHEN ${issuesTable.cancelledAt} IS NOT NULL THEN 'cancelled'
+              WHEN ${issuesTable.completedAt} IS NOT NULL THEN 'done'
+              WHEN ${issuesTable.startedAt}   IS NOT NULL THEN 'in_progress'
+              ELSE 'todo'
+            END
+          `,
           linearIssueId: issuesTable.linearIssueId,
           linearIssueIdentifier: issuesTable.linearIssueIdentifier,
         })

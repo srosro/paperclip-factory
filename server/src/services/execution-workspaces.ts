@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, issues, projects, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import type {
@@ -481,9 +481,16 @@ export function executionWorkspaceService(db: Db) {
       const linkedIssues = await db
         .select({
           id: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
+          identifier: issues.linearIssueIdentifier,
+          title: sql<string>`''`,
+          status: sql<string>`
+            CASE
+              WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+              WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+              WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+              ELSE 'todo'
+            END
+          `,
         })
         .from(issues)
         .where(and(eq(issues.companyId, workspace.companyId), eq(issues.executionWorkspaceId, workspace.id)));

@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { approvals, issueApprovals, issues } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
@@ -81,15 +81,22 @@ export function issueApprovalService(db: Db) {
           projectId: issues.projectId,
           goalId: issues.goalId,
           parentId: issues.parentId,
-          title: issues.title,
-          description: issues.description,
-          status: issues.status,
-          priority: issues.priority,
+          title: sql<string>`''`,
+          description: sql<string | null>`null`,
+          status: sql<string>`
+            CASE
+              WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+              WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+              WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+              ELSE 'todo'
+            END
+          `,
+          priority: sql<string | null>`null`,
           assigneeAgentId: issues.assigneeAgentId,
           createdByAgentId: issues.createdByAgentId,
           createdByUserId: issues.createdByUserId,
-          issueNumber: issues.issueNumber,
-          identifier: issues.identifier,
+          issueNumber: sql<number | null>`null`,
+          identifier: issues.linearIssueIdentifier,
           requestDepth: issues.requestDepth,
           billingCode: issues.billingCode,
           startedAt: issues.startedAt,

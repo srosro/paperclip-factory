@@ -22,11 +22,19 @@ export function dashboardService(db: Db) {
         .where(eq(agents.companyId, companyId))
         .groupBy(agents.status);
 
+      const derivedStatus = sql<string>`
+        CASE
+          WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+          WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+          WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+          ELSE 'todo'
+        END
+      `;
       const taskRows = await db
-        .select({ status: issues.status, count: sql<number>`count(*)` })
+        .select({ status: derivedStatus, count: sql<number>`count(*)` })
         .from(issues)
         .where(eq(issues.companyId, companyId))
-        .groupBy(issues.status);
+        .groupBy(derivedStatus);
 
       const pendingApprovals = await db
         .select({ count: sql<number>`count(*)` })

@@ -43,6 +43,56 @@ import { getDefaultCompanyGoal } from "./goals.js";
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 
+// Derives the legacy status string from sidecar timestamp columns.
+// cancelled_at > completed_at > started_at; otherwise "todo".
+// Note: "blocked", "backlog", "in_review" are not expressible via timestamps alone —
+// they map to "todo" in the derived expression (a TODO for Task 6+).
+const issueStatusExpr = sql<string>`
+  CASE
+    WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+    WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+    WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+    ELSE 'todo'
+  END
+`;
+
+// Translate a single status string into a timestamp-based WHERE predicate.
+function statusToSqlCondition(status: string) {
+  switch (status) {
+    case "cancelled":   return sql`${issues.cancelledAt} IS NOT NULL`;
+    case "done":        return sql`${issues.completedAt} IS NOT NULL AND ${issues.cancelledAt} IS NULL`;
+    case "in_progress": return sql`${issues.startedAt} IS NOT NULL AND ${issues.completedAt} IS NULL AND ${issues.cancelledAt} IS NULL`;
+    // blocked/backlog/in_review/todo all fall through to "not done/cancelled/in_progress"
+    default:            return sql`${issues.startedAt} IS NULL AND ${issues.completedAt} IS NULL AND ${issues.cancelledAt} IS NULL`;
+  }
+}
+
+// Build an OR-union of per-status conditions for inArray-style filtering.
+function statusesCondition(statuses: string[]) {
+  if (statuses.length === 0) return sql`false`;
+  if (statuses.length === 1) return statusToSqlCondition(statuses[0]);
+  return sql`(${sql.join(statuses.map(statusToSqlCondition), sql` OR `)})`;
+}
+
+// Apply a status string to a sidecar patch by setting the right timestamp.
+// Removes cleared timestamps for transitions away from done/cancelled/in_progress.
+function applyStatusToPatch(
+  status: string,
+  patch: Partial<typeof issues.$inferInsert>,
+): Partial<typeof issues.$inferInsert> {
+  // Set the forward timestamp
+  if (status === "in_progress" && !patch.startedAt) patch.startedAt = new Date();
+  if (status === "done")       patch.completedAt = new Date();
+  if (status === "cancelled")  patch.cancelledAt = new Date();
+  // Clear timestamps that no longer apply
+  if (status !== "done")        patch.completedAt = patch.completedAt ?? null;
+  if (status !== "cancelled")   patch.cancelledAt = patch.cancelledAt ?? null;
+  if (status !== "in_progress" && status !== "done" && status !== "cancelled") {
+    patch.startedAt = patch.startedAt ?? null;
+  }
+  return patch;
+}
+
 function assertTransition(from: string, to: string) {
   if (from === to) return;
   if (!ALL_ISSUE_STATUSES.includes(to)) {
@@ -88,7 +138,36 @@ export interface IssueFilters {
   limit?: number;
 }
 
-type IssueRow = typeof issues.$inferSelect;
+type IssueSidecarRow = typeof issues.$inferSelect;
+// Virtual fields derived from sidecar timestamps or Linear API — not stored in DB columns.
+type IssueDerivedFields = {
+  title: string;
+  description: string | null;
+  status: string;
+  priority: string | null;
+  identifier: string | null;
+  issueNumber: number | null;
+};
+// IssueRow is the full enriched view (sidecar + derived fields).
+type IssueRow = IssueSidecarRow & IssueDerivedFields;
+
+/** Derive the virtual legacy fields from a raw sidecar DB row. */
+function sidecarToIssueRow(row: IssueSidecarRow): IssueRow {
+  const status =
+    row.cancelledAt ? "cancelled"
+    : row.completedAt ? "done"
+    : row.startedAt ? "in_progress"
+    : "todo";
+  return {
+    ...row,
+    title: "",
+    description: null,
+    status,
+    priority: null,
+    identifier: row.linearIssueIdentifier,
+    issueNumber: null,
+  };
+}
 type IssueLabelRow = typeof labels.$inferSelect;
 type IssueActiveRunRow = {
   id: string;
@@ -120,7 +199,17 @@ type IssueUserContextInput = {
 };
 type ProjectGoalReader = Pick<Db, "select">;
 type DbReader = Pick<Db, "select">;
-type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
+// Legacy dropped columns accepted at the API surface for backwards-compat.
+// They are stripped before the DB insert; status is translated to timestamps.
+type IssueLegacyFields = {
+  title?: string | null;
+  description?: string | null;
+  status?: string | null;
+  priority?: string | null;
+  identifier?: string | null;
+  issueNumber?: number | null;
+};
+type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & IssueLegacyFields & {
   labelIds?: string[];
   blockedByIssueIds?: string[];
   inheritExecutionWorkspaceFromIssueId?: string | null;
@@ -543,15 +632,11 @@ const issueListSelect = {
   projectWorkspaceId: issues.projectWorkspaceId,
   goalId: issues.goalId,
   parentId: issues.parentId,
-  title: issues.title,
-  description: sql<string | null>`
-    CASE
-      WHEN ${issues.description} IS NULL THEN NULL
-      ELSE substring(${issues.description} FROM 1 FOR ${ISSUE_LIST_DESCRIPTION_MAX_CHARS})
-    END
-  `,
-  status: issues.status,
-  priority: issues.priority,
+  // title/description/priority live in Linear — null placeholders until Task 6 enriches them
+  title: sql<string>`''`,
+  description: sql<string | null>`null`,
+  status: issueStatusExpr,
+  priority: sql<string | null>`null`,
   assigneeAgentId: issues.assigneeAgentId,
   assigneeUserId: issues.assigneeUserId,
   checkoutRunId: issues.checkoutRunId,
@@ -560,8 +645,8 @@ const issueListSelect = {
   executionLockedAt: issues.executionLockedAt,
   createdByAgentId: issues.createdByAgentId,
   createdByUserId: issues.createdByUserId,
-  issueNumber: issues.issueNumber,
-  identifier: issues.identifier,
+  issueNumber: sql<number | null>`null`,
+  identifier: issues.linearIssueIdentifier,
   originKind: issues.originKind,
   originId: issues.originId,
   originRunId: issues.originRunId,
@@ -603,7 +688,7 @@ export function issueService(db: Db) {
       .where(eq(issues.id, id))
       .then((rows) => rows[0] ?? null);
     if (!row) return null;
-    const [enriched] = await withIssueLabels(db, [row]);
+    const [enriched] = await withIssueLabels(db, [sidecarToIssueRow(row)]);
     return enriched;
   }
 
@@ -611,10 +696,10 @@ export function issueService(db: Db) {
     const row = await db
       .select()
       .from(issues)
-      .where(eq(issues.identifier, identifier.toUpperCase()))
+      .where(eq(issues.linearIssueIdentifier, identifier.toUpperCase()))
       .then((rows) => rows[0] ?? null);
     if (!row) return null;
-    const [enriched] = await withIssueLabels(db, [row]);
+    const [enriched] = await withIssueLabels(db, [sidecarToIssueRow(row)]);
     return enriched;
   }
 
@@ -757,10 +842,10 @@ export function issueService(db: Db) {
         .select({
           currentIssueId: issueRelations.relatedIssueId,
           relatedId: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
-          priority: issues.priority,
+          identifier: issues.linearIssueIdentifier,
+          title: sql<string>`''`,
+          status: issueStatusExpr,
+          priority: sql<string | null>`null`,
           assigneeAgentId: issues.assigneeAgentId,
           assigneeUserId: issues.assigneeUserId,
         })
@@ -777,10 +862,10 @@ export function issueService(db: Db) {
         .select({
           currentIssueId: issueRelations.issueId,
           relatedId: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
-          priority: issues.priority,
+          identifier: issues.linearIssueIdentifier,
+          title: sql<string>`''`,
+          status: issueStatusExpr,
+          priority: sql<string | null>`null`,
           assigneeAgentId: issues.assigneeAgentId,
           assigneeUserId: issues.assigneeUserId,
         })
@@ -949,14 +1034,14 @@ export function issueService(db: Db) {
       .where(
         and(
           eq(issues.id, input.issueId),
-          eq(issues.status, "in_progress"),
+          statusesCondition(["in_progress"]),
           eq(issues.assigneeAgentId, input.actorAgentId),
           eq(issues.checkoutRunId, input.expectedCheckoutRunId),
         ),
       )
       .returning({
         id: issues.id,
-        status: issues.status,
+        status: issueStatusExpr,
         assigneeAgentId: issues.assigneeAgentId,
         checkoutRunId: issues.checkoutRunId,
         executionRunId: issues.executionRunId,
@@ -981,21 +1066,18 @@ export function issueService(db: Db) {
       const escapedSearch = hasSearch ? escapeLikePattern(rawSearch) : "";
       const startsWithPattern = `${escapedSearch}%`;
       const containsPattern = `%${escapedSearch}%`;
-      const titleStartsWithMatch = sql<boolean>`${issues.title} ILIKE ${startsWithPattern} ESCAPE '\\'`;
-      const titleContainsMatch = sql<boolean>`${issues.title} ILIKE ${containsPattern} ESCAPE '\\'`;
-      const identifierStartsWithMatch = sql<boolean>`${issues.identifier} ILIKE ${startsWithPattern} ESCAPE '\\'`;
-      const identifierContainsMatch = sql<boolean>`${issues.identifier} ILIKE ${containsPattern} ESCAPE '\\'`;
-      const descriptionContainsMatch = sql<boolean>`${issues.description} ILIKE ${containsPattern} ESCAPE '\\'`;
-      // TODO(messaging-phase2): search comment bodies. Bodies now live in the
-      // messaging backend (FakeAdapter / Slack), not in the DB, so the
-      // EXISTS-against-body-ILIKE query no longer applies. Until we either
-      // persist a searchable body copy or plumb a router-side text index,
-      // comment content is not considered in issue text search.
+      // title/description/identifier no longer in DB — text search falls back to identifier only via linearIssueIdentifier
+      const titleStartsWithMatch = sql<boolean>`${issues.linearIssueIdentifier} ILIKE ${startsWithPattern} ESCAPE '\\'`;
+      const titleContainsMatch = sql<boolean>`${issues.linearIssueIdentifier} ILIKE ${containsPattern} ESCAPE '\\'`;
+      const identifierStartsWithMatch = sql<boolean>`${issues.linearIssueIdentifier} ILIKE ${startsWithPattern} ESCAPE '\\'`;
+      const identifierContainsMatch = sql<boolean>`${issues.linearIssueIdentifier} ILIKE ${containsPattern} ESCAPE '\\'`;
+      // TODO: search title/description/comments via Linear search API (Task 8)
       void containsPattern;
+      const descriptionContainsMatch = sql<boolean>`false`;
       const commentContainsMatch = sql<boolean>`false`;
       if (filters?.status) {
         const statuses = filters.status.split(",").map((s) => s.trim());
-        conditions.push(statuses.length === 1 ? eq(issues.status, statuses[0]) : inArray(issues.status, statuses));
+        conditions.push(statusesCondition(statuses));
       }
       if (filters?.assigneeAgentId) {
         conditions.push(eq(issues.assigneeAgentId, filters.assigneeAgentId));
@@ -1045,7 +1127,6 @@ export function issueService(db: Db) {
       }
       conditions.push(isNull(issues.hiddenAt));
 
-      const priorityOrder = sql`CASE ${issues.priority} WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END`;
       const searchOrder = sql<number>`
         CASE
           WHEN ${titleStartsWithMatch} THEN 0
@@ -1063,8 +1144,7 @@ export function issueService(db: Db) {
         .from(issues)
         .where(and(...conditions))
         .orderBy(
-          hasSearch ? asc(searchOrder) : asc(priorityOrder),
-          asc(priorityOrder),
+          ...(hasSearch ? [asc(searchOrder)] : []),
           desc(canonicalLastActivityAt),
           desc(issues.updatedAt),
         );
@@ -1220,10 +1300,8 @@ export function issueService(db: Db) {
       ];
       if (status) {
         const statuses = status.split(",").map((s) => s.trim()).filter(Boolean);
-        if (statuses.length === 1) {
-          conditions.push(eq(issues.status, statuses[0]));
-        } else if (statuses.length > 1) {
-          conditions.push(inArray(issues.status, statuses));
+        if (statuses.length > 0) {
+          conditions.push(statusesCondition(statuses));
         }
       }
       const [row] = await db
@@ -1343,7 +1421,7 @@ export function issueService(db: Db) {
         .select({
           id: issues.id,
           assigneeAgentId: issues.assigneeAgentId,
-          status: issues.status,
+          status: issueStatusExpr,
         })
         .from(issueRelations)
         .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
@@ -1361,7 +1439,7 @@ export function issueService(db: Db) {
         .select({
           issueId: issueRelations.relatedIssueId,
           blockerIssueId: issueRelations.issueId,
-          blockerStatus: issues.status,
+          blockerStatus: issueStatusExpr,
         })
         .from(issueRelations)
         .innerJoin(issues, eq(issueRelations.issueId, issues.id))
@@ -1403,7 +1481,7 @@ export function issueService(db: Db) {
         .select({
           id: issues.id,
           assigneeAgentId: issues.assigneeAgentId,
-          status: issues.status,
+          status: issueStatusExpr,
           companyId: issues.companyId,
         })
         .from(issues)
@@ -1414,7 +1492,7 @@ export function issueService(db: Db) {
       }
 
       const children = await db
-        .select({ id: issues.id, status: issues.status })
+        .select({ id: issues.id, status: issueStatusExpr })
         .from(issues)
         .where(and(eq(issues.companyId, parent.companyId), eq(issues.parentId, parentIssueId)));
       if (children.length === 0) return null;
@@ -1541,13 +1619,8 @@ export function issueService(db: Db) {
         if (executionWorkspaceId) {
           await assertValidExecutionWorkspace(companyId, issueData.projectId, executionWorkspaceId, tx);
         }
-        // Self-correcting counter: use MAX(issue_number) + 1 if the counter
-        // has drifted below the actual max, preventing identifier collisions.
-        const [maxRow] = await tx
-          .select({ maxNum: sql<number>`coalesce(max(${issues.issueNumber}), 0)` })
-          .from(issues)
-          .where(eq(issues.companyId, companyId));
-        const currentMax = maxRow?.maxNum ?? 0;
+        // issueNumber column dropped in Task 3; counter is now managed solely via companies.issueCounter.
+        const currentMax = 0;
 
         const [company] = await tx
           .update(companies)
@@ -1558,14 +1631,18 @@ export function issueService(db: Db) {
           .returning({ issueCounter: companies.issueCounter, issuePrefix: companies.issuePrefix });
 
         const issueNumber = company.issueCounter;
-        const identifier = `${company.issuePrefix}-${issueNumber}`;
+        const linearIssueIdentifier = `${company.issuePrefix}-${issueNumber}`;
 
-        const values = {
-          ...issueData,
-          originKind: issueData.originKind ?? "manual",
+        // Strip legacy fields that no longer exist in the DB schema
+        const { title: _title, description: _description, status: createStatus, priority: _priority,
+          identifier: _identifier, issueNumber: _issueNumber, ...cleanIssueData } = issueData as typeof issueData & IssueLegacyFields;
+
+        const values: typeof issues.$inferInsert = {
+          ...cleanIssueData,
+          originKind: cleanIssueData.originKind ?? "manual",
           goalId: resolveIssueGoalId({
-            projectId: issueData.projectId,
-            goalId: issueData.goalId,
+            projectId: cleanIssueData.projectId,
+            goalId: cleanIssueData.goalId,
             projectGoalId,
             defaultGoalId: defaultCompanyGoal?.id ?? null,
           }),
@@ -1574,16 +1651,15 @@ export function issueService(db: Db) {
           ...(executionWorkspacePreference ? { executionWorkspacePreference } : {}),
           ...(executionWorkspaceSettings ? { executionWorkspaceSettings } : {}),
           companyId,
-          issueNumber,
-          identifier,
-        } as typeof issues.$inferInsert;
-        if (values.status === "in_progress" && !values.startedAt) {
+          linearIssueIdentifier: cleanIssueData.linearIssueIdentifier ?? linearIssueIdentifier,
+        };
+        if (createStatus === "in_progress" && !values.startedAt) {
           values.startedAt = new Date();
         }
-        if (values.status === "done") {
+        if (createStatus === "done") {
           values.completedAt = new Date();
         }
-        if (values.status === "cancelled") {
+        if (createStatus === "cancelled") {
           values.cancelledAt = new Date();
         }
 
@@ -1603,14 +1679,14 @@ export function issueService(db: Db) {
             tx,
           );
         }
-        const [enriched] = await withIssueLabels(tx, [issue]);
+        const [enriched] = await withIssueLabels(tx, [sidecarToIssueRow(issue)]);
         return enriched;
       });
     },
 
     update: async (
       id: string,
-      data: Partial<typeof issues.$inferInsert> & {
+      data: Partial<typeof issues.$inferInsert> & IssueLegacyFields & {
         labelIds?: string[];
         blockedByIssueIds?: string[];
         actorAgentId?: string | null;
@@ -1630,6 +1706,12 @@ export function issueService(db: Db) {
         blockedByIssueIds,
         actorAgentId,
         actorUserId,
+        title: _updateTitle,
+        description: _updateDesc,
+        status: updateStatus,
+        priority: _updatePriority,
+        identifier: _updateIdentifier,
+        issueNumber: _updateIssueNumber,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
@@ -1639,8 +1721,13 @@ export function issueService(db: Db) {
         delete issueData.executionWorkspaceSettings;
       }
 
-      if (issueData.status) {
-        assertTransition(existing.status, issueData.status);
+      // Derive existing status from timestamps for transition validation
+      const existingStatus = existing.cancelledAt ? "cancelled"
+        : existing.completedAt ? "done"
+        : existing.startedAt ? "in_progress"
+        : "todo";
+      if (updateStatus) {
+        assertTransition(existingStatus, updateStatus);
       }
 
       const patch: Partial<typeof issues.$inferInsert> = {
@@ -1656,7 +1743,7 @@ export function issueService(db: Db) {
       if (nextAssigneeAgentId && nextAssigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
       }
-      if (patch.status === "in_progress" && !nextAssigneeAgentId && !nextAssigneeUserId) {
+      if (updateStatus === "in_progress" && !nextAssigneeAgentId && !nextAssigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
       if (issueData.assigneeAgentId) {
@@ -1677,14 +1764,14 @@ export function issueService(db: Db) {
         await assertValidExecutionWorkspace(existing.companyId, nextProjectId, nextExecutionWorkspaceId);
       }
 
-      applyStatusSideEffects(issueData.status, patch);
-      if (issueData.status && issueData.status !== "done") {
+      applyStatusSideEffects(updateStatus ?? undefined, patch);
+      if (updateStatus && updateStatus !== "done") {
         patch.completedAt = null;
       }
-      if (issueData.status && issueData.status !== "cancelled") {
+      if (updateStatus && updateStatus !== "cancelled") {
         patch.cancelledAt = null;
       }
-      if (issueData.status && issueData.status !== "in_progress") {
+      if (updateStatus && updateStatus !== "in_progress") {
         patch.checkoutRunId = null;
         // Fix B: also clear the execution lock when leaving in_progress
         patch.executionRunId = null;
@@ -1743,7 +1830,7 @@ export function issueService(db: Db) {
             tx,
           );
         }
-        const [enriched] = await withIssueLabels(tx, [updated]);
+        const [enriched] = await withIssueLabels(tx, [sidecarToIssueRow(updated)]);
         return enriched;
       };
 
@@ -1790,7 +1877,7 @@ export function issueService(db: Db) {
         }
 
         if (!removedIssue) return null;
-        const [enriched] = await withIssueLabels(tx, [removedIssue]);
+        const [enriched] = await withIssueLabels(tx, [sidecarToIssueRow(removedIssue)]);
         return enriched;
       }),
 
@@ -1854,14 +1941,15 @@ export function issueService(db: Db) {
           assigneeUserId: null,
           checkoutRunId,
           executionRunId: checkoutRunId,
-          status: "in_progress",
           startedAt: now,
+          completedAt: null,
+          cancelledAt: null,
           updatedAt: now,
         })
         .where(
           and(
             eq(issues.id, id),
-            inArray(issues.status, expectedStatuses),
+            statusesCondition(expectedStatuses),
             or(isNull(issues.assigneeAgentId), sameRunAssigneeCondition),
             executionLockCondition,
           ),
@@ -1870,14 +1958,14 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (updated) {
-        const [enriched] = await withIssueLabels(db, [updated]);
+        const [enriched] = await withIssueLabels(db, [sidecarToIssueRow(updated)]);
         return enriched;
       }
 
       const current = await db
         .select({
           id: issues.id,
-          status: issues.status,
+          status: issueStatusExpr,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
           executionRunId: issues.executionRunId,
@@ -1905,7 +1993,7 @@ export function issueService(db: Db) {
           .where(
             and(
               eq(issues.id, id),
-              eq(issues.status, "in_progress"),
+              statusesCondition(["in_progress"]),
               eq(issues.assigneeAgentId, agentId),
               isNull(issues.checkoutRunId),
               or(isNull(issues.executionRunId), eq(issues.executionRunId, checkoutRunId)),
@@ -1932,7 +2020,7 @@ export function issueService(db: Db) {
         if (adopted) {
           const row = await db.select().from(issues).where(eq(issues.id, id)).then((rows) => rows[0] ?? null);
           if (!row) throw notFound("Issue not found");
-          const [enriched] = await withIssueLabels(db, [row]);
+          const [enriched] = await withIssueLabels(db, [sidecarToIssueRow(row)]);
           return enriched;
         }
       }
@@ -1945,7 +2033,7 @@ export function issueService(db: Db) {
       ) {
         const row = await db.select().from(issues).where(eq(issues.id, id)).then((rows) => rows[0] ?? null);
         if (!row) throw notFound("Issue not found");
-        const [enriched] = await withIssueLabels(db, [row]);
+        const [enriched] = await withIssueLabels(db, [sidecarToIssueRow(row)]);
         return enriched;
       }
 
@@ -1962,7 +2050,7 @@ export function issueService(db: Db) {
       const current = await db
         .select({
           id: issues.id,
-          status: issues.status,
+          status: issueStatusExpr,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
         })
@@ -2023,9 +2111,13 @@ export function issueService(db: Db) {
       if (actorAgentId && existing.assigneeAgentId && existing.assigneeAgentId !== actorAgentId) {
         throw conflict("Only assignee can release issue");
       }
+      const existingStatus = existing.cancelledAt ? "cancelled"
+        : existing.completedAt ? "done"
+        : existing.startedAt ? "in_progress"
+        : "todo";
       if (
         actorAgentId &&
-        existing.status === "in_progress" &&
+        existingStatus === "in_progress" &&
         existing.assigneeAgentId === actorAgentId &&
         existing.checkoutRunId &&
         !sameRunLock(existing.checkoutRunId, actorRunId ?? null)
@@ -2041,7 +2133,9 @@ export function issueService(db: Db) {
       const updated = await db
         .update(issues)
         .set({
-          status: "todo",
+          startedAt: null,
+          completedAt: null,
+          cancelledAt: null,
           assigneeAgentId: null,
           checkoutRunId: null,
           updatedAt: new Date(),
@@ -2050,7 +2144,7 @@ export function issueService(db: Db) {
         .returning()
         .then((rows) => rows[0] ?? null);
       if (!updated) return null;
-      const [enriched] = await withIssueLabels(db, [updated]);
+      const [enriched] = await withIssueLabels(db, [sidecarToIssueRow(updated)]);
       return enriched;
     },
 
@@ -2502,20 +2596,14 @@ export function issueService(db: Db) {
       const issue = await db
         .select({
           companyId: issues.companyId,
-          title: issues.title,
-          description: issues.description,
         })
         .from(issues)
         .where(eq(issues.id, issueId))
         .then((rows) => rows[0] ?? null);
       if (!issue) return [];
 
+      // title/description no longer in sidecar — skip local text search; rely on comment bodies only
       const mentionedIds = new Set<string>();
-      for (const source of [issue.title, issue.description ?? ""]) {
-        for (const projectId of extractProjectMentionIds(source)) {
-          mentionedIds.add(projectId);
-        }
-      }
 
       if (opts?.includeCommentBodies !== false) {
         const ctx = await resolveMessagingContext(issue.companyId);
@@ -2556,17 +2644,25 @@ export function issueService(db: Db) {
       while (currentId && !visited.has(currentId) && raw.length < 50) {
         visited.add(currentId);
         const parent = await db.select({
-          id: issues.id, identifier: issues.identifier, title: issues.title, description: issues.description,
-          status: issues.status, priority: issues.priority,
-          assigneeAgentId: issues.assigneeAgentId, projectId: issues.projectId,
-          goalId: issues.goalId, parentId: issues.parentId,
+          id: issues.id,
+          identifier: issues.linearIssueIdentifier,
+          status: issueStatusExpr,
+          assigneeAgentId: issues.assigneeAgentId,
+          projectId: issues.projectId,
+          goalId: issues.goalId,
+          parentId: issues.parentId,
         }).from(issues).where(eq(issues.id, currentId)).then(r => r[0] ?? null);
         if (!parent) break;
         raw.push({
-          id: parent.id, identifier: parent.identifier ?? null, title: parent.title, description: parent.description ?? null,
-          status: parent.status, priority: parent.priority,
+          id: parent.id,
+          identifier: parent.identifier ?? null,
+          title: "", // TODO: fetch from Linear (Task 6)
+          description: null,
+          status: parent.status,
+          priority: "medium", // TODO: fetch from Linear (Task 6)
           assigneeAgentId: parent.assigneeAgentId ?? null,
-          projectId: parent.projectId ?? null, goalId: parent.goalId ?? null,
+          projectId: parent.projectId ?? null,
+          goalId: parent.goalId ?? null,
         });
         currentId = parent.parentId ?? null;
       }

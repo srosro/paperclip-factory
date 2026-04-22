@@ -17,6 +17,7 @@ import type {
   CreateRoutineTrigger,
   Routine,
   RoutineDetail,
+  RoutineIssueSummary,
   RoutineListItem,
   RoutineRunSummary,
   RoutineTrigger,
@@ -43,8 +44,38 @@ import { heartbeatService } from "./heartbeat.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
 
-const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
+// OPEN_ISSUE_STATUSES kept for reference; actual SQL filtering uses timestamp conditions.
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running"];
+// Timestamp-based condition equivalent to "not done and not cancelled".
+const openIssueCondition = sql`(${issues.completedAt} IS NULL AND ${issues.cancelledAt} IS NULL)`;
+const issueStatusExpr = sql<string>`
+  CASE
+    WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+    WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+    WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+    ELSE 'todo'
+  END
+`;
+
+/** Map a raw sidecar row or IssueWithLabels to the RoutineIssueSummary shape. */
+function toRoutineIssueSummary(
+  issue: { id: string; linearIssueIdentifier?: string | null; identifier?: string | null; title?: string; status?: string; priority?: string | null; startedAt?: Date | null; completedAt?: Date | null; cancelledAt?: Date | null; updatedAt: Date },
+): RoutineIssueSummary {
+  const status = issue.status ?? (
+    issue.cancelledAt ? "cancelled"
+    : issue.completedAt ? "done"
+    : issue.startedAt ? "in_progress"
+    : "todo"
+  );
+  return {
+    id: issue.id,
+    identifier: issue.identifier ?? issue.linearIssueIdentifier ?? null,
+    title: issue.title ?? "",
+    status,
+    priority: issue.priority ?? "none",
+    updatedAt: issue.updatedAt,
+  };
+}
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 const MAX_CATCH_UP_RUNS = 25;
 const WEEKDAY_INDEX: Record<string, number> = {
@@ -418,10 +449,10 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         updatedAt: routineRuns.updatedAt,
         triggerKind: routineTriggers.kind,
         triggerLabel: routineTriggers.label,
-        issueIdentifier: issues.identifier,
-        issueTitle: issues.title,
-        issueStatus: issues.status,
-        issuePriority: issues.priority,
+        issueIdentifier: issues.linearIssueIdentifier,
+        issueTitle: sql<string>`''`,
+        issueStatus: issueStatusExpr,
+        issuePriority: sql<string | null>`null`,
         issueUpdatedAt: issues.updatedAt,
       })
       .from(routineRuns)
@@ -476,10 +507,10 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
       .selectDistinctOn([issues.originId], {
         originId: issues.originId,
         id: issues.id,
-        identifier: issues.identifier,
-        title: issues.title,
-        status: issues.status,
-        priority: issues.priority,
+        identifier: issues.linearIssueIdentifier,
+        title: sql<string>`''`,
+        status: issueStatusExpr,
+        priority: sql<string | null>`null`,
         updatedAt: issues.updatedAt,
       })
       .from(issues)
@@ -495,7 +526,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           eq(issues.companyId, companyId),
           eq(issues.originKind, "routine_execution"),
           inArray(issues.originId, routineIds),
-          inArray(issues.status, OPEN_ISSUE_STATUSES),
+          openIssueCondition,
           isNull(issues.hiddenAt),
         ),
       )
@@ -513,10 +544,10 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         .selectDistinctOn([issues.originId], {
           originId: issues.originId,
           id: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
-          priority: issues.priority,
+          identifier: issues.linearIssueIdentifier,
+          title: sql<string>`''`,
+          status: issueStatusExpr,
+          priority: sql<string | null>`null`,
           updatedAt: issues.updatedAt,
         })
         .from(issues)
@@ -533,7 +564,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
             eq(issues.companyId, companyId),
             eq(issues.originKind, "routine_execution"),
             inArray(issues.originId, missingRoutineIds),
-            inArray(issues.status, OPEN_ISSUE_STATUSES),
+            openIssueCondition,
             isNull(issues.hiddenAt),
           ),
         )
@@ -553,7 +584,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         identifier: row.identifier,
         title: row.title,
         status: row.status,
-        priority: row.priority,
+        priority: row.priority ?? "none",
         updatedAt: row.updatedAt,
       });
     }
@@ -606,7 +637,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           eq(issues.companyId, routine.companyId),
           eq(issues.originKind, "routine_execution"),
           eq(issues.originId, routine.id),
-          inArray(issues.status, OPEN_ISSUE_STATUSES),
+          openIssueCondition,
           isNull(issues.hiddenAt),
         ),
       )
@@ -631,7 +662,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           eq(issues.companyId, routine.companyId),
           eq(issues.originKind, "routine_execution"),
           eq(issues.originId, routine.id),
-          inArray(issues.status, OPEN_ISSUE_STATUSES),
+          openIssueCondition,
           isNull(issues.hiddenAt),
         ),
       )
@@ -963,10 +994,10 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
             updatedAt: routineRuns.updatedAt,
             triggerKind: routineTriggers.kind,
             triggerLabel: routineTriggers.label,
-            issueIdentifier: issues.identifier,
-            issueTitle: issues.title,
-            issueStatus: issues.status,
-            issuePriority: issues.priority,
+            issueIdentifier: issues.linearIssueIdentifier,
+            issueTitle: sql<string>`''`,
+            issueStatus: issueStatusExpr,
+            issuePriority: sql<string | null>`null`,
             issueUpdatedAt: issues.updatedAt,
           })
           .from(routineRuns)
@@ -1018,10 +1049,10 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         ...row,
         project,
         assignee,
-        parentIssue,
+        parentIssue: parentIssue ? toRoutineIssueSummary(parentIssue) : null,
         triggers: triggers as RoutineTrigger[],
         recentRuns,
-        activeIssue,
+        activeIssue: activeIssue ? toRoutineIssueSummary(activeIssue) : null,
       };
     },
 
@@ -1406,10 +1437,10 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           updatedAt: routineRuns.updatedAt,
           triggerKind: routineTriggers.kind,
           triggerLabel: routineTriggers.label,
-          issueIdentifier: issues.identifier,
-          issueTitle: issues.title,
-          issueStatus: issues.status,
-          issuePriority: issues.priority,
+          issueIdentifier: issues.linearIssueIdentifier,
+          issueTitle: sql<string>`''`,
+          issueStatus: issueStatusExpr,
+          issuePriority: sql<string | null>`null`,
           issueUpdatedAt: issues.updatedAt,
         })
         .from(routineRuns)
@@ -1525,7 +1556,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
       const issue = await db
         .select({
           id: issues.id,
-          status: issues.status,
+          status: issueStatusExpr,
           originKind: issues.originKind,
           originRunId: issues.originRunId,
         })

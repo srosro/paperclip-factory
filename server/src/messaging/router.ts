@@ -216,10 +216,11 @@ export function createIssueTrackerRouter(deps: RouterDeps): IssueTrackerRouter {
     if (row.linearIssueId) {
       return { externalIssueRef: row.linearIssueId, issueRow: row };
     }
+    // title/description dropped from sidecar in Task 3 — use linearIssueIdentifier as placeholder title
     const created = await adapter.createIssue({
       externalTeamRef: "",
-      title: row.title,
-      description: row.description ?? null,
+      title: row.linearIssueIdentifier ?? row.id,
+      description: null,
       assigneeExternalRef: null,
       stateExternalRef: null,
       priority: null,

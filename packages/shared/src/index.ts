@@ -368,6 +368,7 @@ export type {
   RoutineRun,
   RoutineTriggerSecretMaterial,
   RoutineDetail,
+  RoutineIssueSummary,
   RoutineRunSummary,
   RoutineExecutionIssueOrigin,
   RoutineListItem,

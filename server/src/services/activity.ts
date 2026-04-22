@@ -180,13 +180,21 @@ export function activityService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!run) return [];
 
+      const issueStatusExpr = sql<string>`
+        CASE
+          WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+          WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+          WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+          ELSE 'todo'
+        END
+      `;
       const fromActivity = await db
         .selectDistinctOn([issueIdAsText], {
           issueId: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
-          priority: issues.priority,
+          identifier: issues.linearIssueIdentifier,
+          title: sql<string>`''`,
+          status: issueStatusExpr,
+          priority: sql<string | null>`null`,
         })
         .from(activityLog)
         .innerJoin(issues, eq(activityLog.entityId, issueIdAsText))
@@ -211,10 +219,10 @@ export function activityService(db: Db) {
       const fromContext = await db
         .select({
           issueId: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
-          priority: issues.priority,
+          identifier: issues.linearIssueIdentifier,
+          title: sql<string>`''`,
+          status: issueStatusExpr,
+          priority: sql<string | null>`null`,
         })
         .from(issues)
         .where(

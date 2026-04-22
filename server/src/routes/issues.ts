@@ -2030,10 +2030,13 @@ export function issueRoutes(
     assertCompanyAccess(req, existing.companyId);
     const attachments = await svc.listAttachments(id);
 
-    const issue = await svc.remove(id);
-    if (!issue) {
-      res.status(404).json({ error: "Issue not found" });
-      return;
+    const linearSvc = await makeLinearSvc(existing.companyId).catch(() => null);
+    if (linearSvc) {
+      await linearSvc.remove(id).catch((err) =>
+        logger.warn({ err, issueId: id }, "linearSvc.remove failed; falling back to svc.remove"),
+      );
+    } else {
+      await svc.remove(id);
     }
 
     for (const attachment of attachments) {
@@ -2046,17 +2049,17 @@ export function issueRoutes(
 
     const actor = getActorInfo(req);
     await logActivity(db, {
-      companyId: issue.companyId,
+      companyId: existing.companyId,
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
       runId: actor.runId,
       action: "issue.deleted",
       entityType: "issue",
-      entityId: issue.id,
+      entityId: existing.id,
     });
 
-    res.json(issue);
+    res.json(existing);
   });
 
   router.post("/issues/:id/checkout", validate(checkoutIssueSchema), async (req, res) => {

@@ -178,8 +178,8 @@ async function resolveRunScopedMentionedSkillKeys(input: {
 
   const issue = await input.db
     .select({
-      title: issues.title,
-      description: issues.description,
+      title: sql<string>`''`,
+      description: sql<string | null>`null`,
     })
     .from(issues)
     .where(and(eq(issues.id, input.issueId), eq(issues.companyId, input.companyId)))
@@ -1223,10 +1223,17 @@ async function buildPaperclipWakePayload(input: {
       ? await input.db
           .select({
             id: issues.id,
-            identifier: issues.identifier,
-            title: issues.title,
-            status: issues.status,
-            priority: issues.priority,
+            identifier: issues.linearIssueIdentifier,
+            title: sql<string>`''`,
+            status: sql<string>`
+              CASE
+                WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+                WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+                WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+                ELSE 'todo'
+              END
+            `,
+            priority: sql<string | null>`null`,
           })
           .from(issues)
           .where(and(eq(issues.id, issueId), eq(issues.companyId, input.companyId)))
@@ -1564,10 +1571,17 @@ export function heartbeatService(db: Db) {
     return db
       .select({
         id: issues.id,
-        identifier: issues.identifier,
-        title: issues.title,
-        status: issues.status,
-        priority: issues.priority,
+        identifier: issues.linearIssueIdentifier,
+        title: sql<string>`''`,
+        status: sql<string>`
+          CASE
+            WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+            WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+            WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+            ELSE 'todo'
+          END
+        `,
+        priority: sql<string | null>`null`,
         projectId: issues.projectId,
         projectWorkspaceId: issues.projectWorkspaceId,
         executionWorkspaceId: issues.executionWorkspaceId,
@@ -3013,7 +3027,7 @@ export function heartbeatService(db: Db) {
       entityType: "issue",
       entityId: input.issue.id,
       details: {
-        identifier: input.issue.identifier,
+        identifier: input.issue.linearIssueIdentifier,
         status: "blocked",
         previousStatus: input.previousStatus,
         source: "heartbeat.reconcile_stranded_assigned_issue",
@@ -3033,7 +3047,10 @@ export function heartbeatService(db: Db) {
       .where(
         and(
           isNull(issues.assigneeUserId),
-          inArray(issues.status, ["todo", "in_progress"]),
+          // todo = all timestamps null; in_progress = startedAt set but not done/cancelled
+          sql`(${issues.startedAt} IS NULL OR (${issues.startedAt} IS NOT NULL AND ${issues.completedAt} IS NULL AND ${issues.cancelledAt} IS NULL))`,
+          isNull(issues.completedAt),
+          isNull(issues.cancelledAt),
           sql`${issues.assigneeAgentId} is not null`,
         ),
       );
@@ -3072,7 +3089,8 @@ export function heartbeatService(db: Db) {
       const latestContext = parseObject(latestRun?.contextSnapshot);
       const latestRetryReason = readNonEmptyString(latestContext.retryReason);
 
-      if (issue.status === "todo") {
+      const issueStatus = issue.startedAt ? "in_progress" : "todo";
+      if (issueStatus === "todo") {
         if (!latestRun || latestRun.status === "succeeded") {
           result.skipped += 1;
           continue;
@@ -3382,7 +3400,7 @@ export function heartbeatService(db: Db) {
             identifier: issueRef.identifier,
             title: issueRef.title,
             status: issueRef.status,
-            priority: issueRef.priority,
+            priority: issueRef.priority ?? "none",
           }
         : null,
     });
@@ -4255,8 +4273,15 @@ export function heartbeatService(db: Db) {
         .select({
           id: issues.id,
           companyId: issues.companyId,
-          identifier: issues.identifier,
-          status: issues.status,
+          identifier: issues.linearIssueIdentifier,
+          status: sql<string>`
+            CASE
+              WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+              WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+              WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+              ELSE 'todo'
+            END
+          `,
           executionRunId: issues.executionRunId,
         })
         .from(issues)

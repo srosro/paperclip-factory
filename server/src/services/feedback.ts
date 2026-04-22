@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, desc, eq, getTableColumns, gte, lte, ne, or } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gte, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -1721,8 +1721,8 @@ export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {
       const rows = await db
         .select({
           ...feedbackExportColumns,
-          issueIdentifier: issues.identifier,
-          issueTitle: issues.title,
+          issueIdentifier: issues.linearIssueIdentifier,
+          issueTitle: sql<string>`''`,
         })
         .from(feedbackExports)
         .innerJoin(issues, eq(feedbackExports.issueId, issues.id))
@@ -1736,8 +1736,8 @@ export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {
       const row = await db
         .select({
           ...feedbackExportColumns,
-          issueIdentifier: issues.identifier,
-          issueTitle: issues.title,
+          issueIdentifier: issues.linearIssueIdentifier,
+          issueTitle: sql<string>`''`,
         })
         .from(feedbackExports)
         .innerJoin(issues, eq(feedbackExports.issueId, issues.id))
@@ -1750,8 +1750,8 @@ export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {
       const row = await db
         .select({
           ...feedbackExportColumns,
-          issueIdentifier: issues.identifier,
-          issueTitle: issues.title,
+          issueIdentifier: issues.linearIssueIdentifier,
+          issueTitle: sql<string>`''`,
         })
         .from(feedbackExports)
         .innerJoin(issues, eq(feedbackExports.issueId, issues.id))
@@ -1821,8 +1821,8 @@ export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {
       const rows = await db
         .select({
           ...feedbackExportColumns,
-          issueIdentifier: issues.identifier,
-          issueTitle: issues.title,
+          issueIdentifier: issues.linearIssueIdentifier,
+          issueTitle: sql<string>`''`,
         })
         .from(feedbackExports)
         .innerJoin(issues, eq(feedbackExports.issueId, issues.id))
@@ -1891,9 +1891,9 @@ export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {
             id: issues.id,
             companyId: issues.companyId,
             projectId: issues.projectId,
-            identifier: issues.identifier,
-            title: issues.title,
-            description: issues.description,
+            identifier: issues.linearIssueIdentifier,
+            title: sql<string>`''`,
+            description: sql<string | null>`null`,
           })
           .from(issues)
           .where(eq(issues.id, input.issueId))

@@ -5,13 +5,6 @@ import type { Request } from "express";
 import { forbidden } from "../errors.js";
 import { assertCompanyAccess } from "./authz.js";
 
-const WORKSPACE_RUNTIME_ELIGIBLE_ISSUE_STATUSES: string[] = [
-  "backlog",
-  "todo",
-  "in_progress",
-  "in_review",
-  "blocked",
-];
 
 async function listReportingSubtreeAgentIds(db: Db, companyId: string, actorAgentId: string) {
   const companyAgents = await db
@@ -95,7 +88,9 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
     .where(and(
       eq(issues.companyId, input.companyId),
       isNull(issues.hiddenAt),
-      inArray(issues.status, WORKSPACE_RUNTIME_ELIGIBLE_ISSUE_STATUSES),
+      // eligible = not done and not cancelled (covers backlog/todo/in_progress/in_review/blocked)
+      isNull(issues.completedAt),
+      isNull(issues.cancelledAt),
       inArray(issues.assigneeAgentId, eligibleAgentIds),
       workspaceScopeConditions.length === 1
         ? workspaceScopeConditions[0]!
