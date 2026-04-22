@@ -119,12 +119,8 @@ describeIf("cache-sync full field sync", () => {
     await db.insert(issues).values({
       companyId: company!.id,
       projectId: project!.id,
-      title: "Old title",
-      identifier: "TST-1",
       linearIssueId,
       linearIssueIdentifier: "TST-1",
-      status: "todo",
-      priority: "medium",
     });
 
     const stateId = randomUUID();
@@ -157,8 +153,11 @@ describeIf("cache-sync full field sync", () => {
 
     const [row] = await db.select().from(issues)
       .where(eq(issues.linearIssueId, linearIssueId));
-    expect(row!.title).toBe("New title");
-    expect(row!.status).toBe("in_progress");
-    expect(row!.priority).toBe("high");
+    // title/priority columns dropped in Task 3 — Linear is now source of truth.
+    // Status is expressed via sidecar timestamps: in_progress → startedAt set.
+    expect(row!.linearIssueIdentifier).toBe("TST-1");
+    expect(row!.startedAt).not.toBeNull();
+    expect(row!.completedAt).toBeNull();
+    expect(row!.cancelledAt).toBeNull();
   });
 });

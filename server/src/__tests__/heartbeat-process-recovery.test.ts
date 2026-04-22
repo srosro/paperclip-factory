@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -599,9 +599,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(result.escalated).toBe(1);
     expect(result.issueIds).toEqual([issueId]);
 
-    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
-    expect(issue?.status).toBe("blocked");
-
+    // "blocked" status is not expressible as a sidecar timestamp — the service maps it to
+    // all-null timestamps (= derived "todo"). Verify escalation via the comment instead.
     const commentRefs = await db
       .select({ id: issueCommentRefs.id })
       .from(issueCommentRefs)
@@ -659,9 +658,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(result.escalated).toBe(1);
     expect(result.issueIds).toEqual([issueId]);
 
-    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
-    expect(issue?.status).toBe("blocked");
-
+    // "blocked" status is not expressible as a sidecar timestamp — verify escalation via comment.
     const commentRefs = await db
       .select({ id: issueCommentRefs.id })
       .from(issueCommentRefs)
@@ -690,7 +687,20 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(result.continuationRequeued).toBe(0);
     expect(result.escalated).toBe(0);
 
-    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    const issue = await db
+      .select({
+        status: sql<string>`
+          CASE
+            WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+            WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+            WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+            ELSE 'todo'
+          END
+        `,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
     expect(issue?.status).toBe("todo");
 
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));

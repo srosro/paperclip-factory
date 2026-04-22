@@ -110,10 +110,11 @@ export async function seedIssueComment(
     .select({
       id: issuesTable.id,
       linearIssueId: issuesTable.linearIssueId,
+      linearIssueIdentifier: issuesTable.linearIssueIdentifier,
     })
     .from(issuesTable)
     .where(eq(issuesTable.id, args.issueId))
-    .then((rows: Array<{ id: string; linearIssueId: string | null }>) => rows[0]);
+    .then((rows: Array<{ id: string; linearIssueId: string | null; linearIssueIdentifier: string | null }>) => rows[0]);
   if (!issueRow) {
     throw new Error(`seedIssueComment: issue ${args.issueId} not found`);
   }
@@ -124,7 +125,8 @@ export async function seedIssueComment(
       .update(issuesTable)
       .set({
         linearIssueId: externalIssueRef,
-        linearIssueIdentifier: `FAKE-${args.issueId.slice(0, 6)}`,
+        // Preserve existing identifier; only fall back to FAKE-* when none set.
+        linearIssueIdentifier: issueRow.linearIssueIdentifier ?? `FAKE-${args.issueId.slice(0, 6)}`,
       })
       .where(eq(issuesTable.id, args.issueId));
   }

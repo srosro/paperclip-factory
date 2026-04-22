@@ -675,27 +675,68 @@ export function issueRoutes(
       return;
     }
 
-    const result = await svc.list(companyId, {
-      status: req.query.status as string | undefined,
-      assigneeAgentId: req.query.assigneeAgentId as string | undefined,
-      participantAgentId: req.query.participantAgentId as string | undefined,
-      assigneeUserId,
-      touchedByUserId,
-      inboxArchivedByUserId,
-      unreadForUserId,
-      projectId: req.query.projectId as string | undefined,
-      executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
-      parentId: req.query.parentId as string | undefined,
-      labelId: req.query.labelId as string | undefined,
-      originKind: req.query.originKind as string | undefined,
-      originId: req.query.originId as string | undefined,
-      includeRoutineExecutions:
-        req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
-      excludeRoutineExecutions:
-        req.query.excludeRoutineExecutions === "true" || req.query.excludeRoutineExecutions === "1",
-      q: req.query.q as string | undefined,
-      limit,
-    });
+    // Attempt to serve the list from Linear via LinearBackedIssueService.
+    // Linear-backed list only supports assigneeAgentId + limit; for all other
+    // filter combinations fall back to the DB-backed svc.list().
+    const hasLinearFiltersOnly =
+      !req.query.participantAgentId &&
+      !req.query.touchedByUserId &&
+      !req.query.inboxArchivedByUserId &&
+      !req.query.unreadForUserId &&
+      !req.query.projectId &&
+      !req.query.executionWorkspaceId &&
+      !req.query.parentId &&
+      !req.query.labelId &&
+      !req.query.originKind &&
+      !req.query.originId &&
+      !req.query.q &&
+      !req.query.status &&
+      !assigneeUserId &&
+      !touchedByUserId &&
+      !inboxArchivedByUserId &&
+      !unreadForUserId;
+
+    let result: Awaited<ReturnType<typeof svc.list>>;
+    if (hasLinearFiltersOnly) {
+      try {
+        const linearSvc = await makeLinearSvc(companyId);
+        const assigneeAgentIdParam = req.query.assigneeAgentId as string | undefined;
+        result = await linearSvc.list({
+          assigneeAgentId: assigneeAgentIdParam,
+          limit,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any;
+      } catch (err) {
+        if (!isMessagingUnavailable(err)) throw err;
+        // Fall back to DB-backed list when messaging is not configured.
+        result = await svc.list(companyId, {
+          assigneeAgentId: req.query.assigneeAgentId as string | undefined,
+          limit,
+        });
+      }
+    } else {
+      result = await svc.list(companyId, {
+        status: req.query.status as string | undefined,
+        assigneeAgentId: req.query.assigneeAgentId as string | undefined,
+        participantAgentId: req.query.participantAgentId as string | undefined,
+        assigneeUserId,
+        touchedByUserId,
+        inboxArchivedByUserId,
+        unreadForUserId,
+        projectId: req.query.projectId as string | undefined,
+        executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
+        parentId: req.query.parentId as string | undefined,
+        labelId: req.query.labelId as string | undefined,
+        originKind: req.query.originKind as string | undefined,
+        originId: req.query.originId as string | undefined,
+        includeRoutineExecutions:
+          req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
+        excludeRoutineExecutions:
+          req.query.excludeRoutineExecutions === "true" || req.query.excludeRoutineExecutions === "1",
+        q: req.query.q as string | undefined,
+        limit,
+      });
+    }
     res.json(result);
   });
 
@@ -1373,20 +1414,46 @@ export function issueRoutes(
     const executionPolicy = normalizeIssueExecutionPolicy(req.body.executionPolicy);
 
     // Create directly in Linear (source of truth) via LinearBackedIssueService.
-    const linearSvc = await makeLinearSvc(companyId);
-    const issue = await linearSvc.create({
-      title: req.body.title as string,
-      description: req.body.description as string | null | undefined,
-      assigneeAgentId: req.body.assigneeAgentId as string | null | undefined,
-      assigneeUserId: req.body.assigneeUserId as string | null | undefined,
-      executionPolicy: executionPolicy as Record<string, unknown> | null,
-      goalId: req.body.goalId as string | null | undefined,
-      projectId: req.body.projectId as string | null | undefined,
-      parentId: req.body.parentId as string | null | undefined,
-    });
+    // Fall back to DB-only creation when messaging is not configured (e.g. import/export flows).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let issue: any;
+    try {
+      const linearSvc = await makeLinearSvc(companyId);
+      issue = await linearSvc.create({
+        title: req.body.title as string,
+        description: req.body.description as string | null | undefined,
+        assigneeAgentId: req.body.assigneeAgentId as string | null | undefined,
+        assigneeUserId: req.body.assigneeUserId as string | null | undefined,
+        executionPolicy: executionPolicy as Record<string, unknown> | null,
+        goalId: req.body.goalId as string | null | undefined,
+        projectId: req.body.projectId as string | null | undefined,
+        parentId: req.body.parentId as string | null | undefined,
+      });
+    } catch (err) {
+      if (!isMessagingUnavailable(err)) throw err;
+      // Messaging not configured — fall back to DB-only sidecar creation.
+      issue = await svc.create(companyId, {
+        title: req.body.title as string | undefined,
+        description: req.body.description as string | null | undefined,
+        status: req.body.status as string | undefined,
+        priority: req.body.priority as string | undefined,
+        assigneeAgentId: req.body.assigneeAgentId as string | null | undefined,
+        assigneeUserId: req.body.assigneeUserId as string | null | undefined,
+        executionPolicy: executionPolicy as Record<string, unknown> | null,
+        goalId: req.body.goalId as string | null | undefined,
+        projectId: req.body.projectId as string | null | undefined,
+        parentId: req.body.parentId as string | null | undefined,
+        labelIds: Array.isArray(req.body.labelIds) ? req.body.labelIds as string[] : undefined,
+        blockedByIssueIds: Array.isArray(req.body.blockedByIssueIds) ? req.body.blockedByIssueIds as string[] : undefined,
+        inheritExecutionWorkspaceFromIssueId: req.body.inheritExecutionWorkspaceFromIssueId as string | null | undefined,
+        billingCode: req.body.billingCode as string | null | undefined,
+        createdByAgentId: actor.agentId ?? null,
+        createdByUserId: actor.actorType === "user" ? actor.actorId ?? null : null,
+      });
+    }
 
     // TODO Task 6: handle labelIds, blockedByIssueIds, workspace inheritance, billing codes
-    // via svc once svc.create() is updated to work without dropped columns.
+    // via linearSvc once svc.create() is updated to work without dropped columns.
 
     await logActivity(db, {
       companyId,
@@ -2175,7 +2242,7 @@ export function issueRoutes(
 
   router.get("/issues/:id/comments", async (req, res) => {
     const id = req.params.id as string;
-    const issue = await svc.getById(id);
+    const issue = await getLinearIssue(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -2199,11 +2266,14 @@ export function issueRoutes(
       limitRaw && Number.isFinite(limitRaw) && limitRaw > 0
         ? Math.min(Math.floor(limitRaw), MAX_ISSUE_COMMENT_LIMIT)
         : null;
-    const comments = await svc.listComments(id, {
-      afterCommentId,
-      order,
-      limit,
-    });
+    let comments: unknown;
+    try {
+      const linearSvc = await makeLinearSvc(issue.companyId);
+      comments = await linearSvc.getComments(id);
+    } catch (err) {
+      if (!isMessagingUnavailable(err)) throw err;
+      comments = await svc.listComments(id, { afterCommentId, order, limit });
+    }
     res.json(comments);
   });
 

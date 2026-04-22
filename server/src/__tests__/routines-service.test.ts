@@ -378,19 +378,14 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       variables: { repo: "paperclip" },
     });
 
-    const storedIssue = await db
-      .select({ title: issues.title, description: issues.description })
-      .from(issues)
-      .where(eq(issues.id, run.linkedIssueId!))
-      .then((rows) => rows[0] ?? null);
+    // title/description columns dropped in Task 3 — they live in Linear now.
+    // Verify that variable resolution is stored in the run's triggerPayload.
     const storedRun = await db
       .select({ triggerPayload: routineRuns.triggerPayload })
       .from(routineRuns)
       .where(eq(routineRuns.id, run.id))
       .then((rows) => rows[0] ?? null);
 
-    expect(storedIssue?.title).toBe("repo triage for paperclip");
-    expect(storedIssue?.description).toBe("Review paperclip for high bugs");
     expect(storedRun?.triggerPayload).toEqual({
       variables: {
         repo: "paperclip",

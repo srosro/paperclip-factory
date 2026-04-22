@@ -133,42 +133,27 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
       {
         id: assignedIssueId,
         companyId,
-        title: "Assigned issue",
-        status: "todo",
-        priority: "medium",
         assigneeAgentId: agentId,
         createdByAgentId: otherAgentId,
       },
       {
         id: createdIssueId,
         companyId,
-        title: "Created issue",
-        status: "todo",
-        priority: "medium",
         createdByAgentId: agentId,
       },
       {
         id: commentedIssueId,
         companyId,
-        title: "Commented issue",
-        status: "todo",
-        priority: "medium",
         createdByAgentId: otherAgentId,
       },
       {
         id: activityIssueId,
         companyId,
-        title: "Activity issue",
-        status: "todo",
-        priority: "medium",
         createdByAgentId: otherAgentId,
       },
       {
         id: excludedIssueId,
         companyId,
-        title: "Excluded issue",
-        status: "todo",
-        priority: "medium",
         createdByAgentId: otherAgentId,
         assigneeAgentId: otherAgentId,
       },
@@ -235,24 +220,21 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
       {
         id: matchedIssueId,
         companyId,
-        title: "Invoice reconciliation",
-        status: "todo",
-        priority: "medium",
+        // identifier-based search is the only text search available after Task 3
+        linearIssueIdentifier: "INV-1",
         createdByAgentId: agentId,
       },
       {
         id: otherIssueId,
         companyId,
-        title: "Weekly planning",
-        status: "todo",
-        priority: "medium",
+        linearIssueIdentifier: "PLN-1",
         createdByAgentId: agentId,
       },
     ]);
 
     const result = await svc.list(companyId, {
       participantAgentId: agentId,
-      q: "invoice",
+      q: "INV",
     });
 
     expect(result.map((issue) => issue.id)).toEqual([matchedIssueId]);
@@ -276,35 +258,30 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
       {
         id: exactIdentifierId,
         companyId,
-        issueNumber: 42,
-        identifier: "PAP-42",
-        title: "Completely unrelated",
-        status: "todo",
-        priority: "medium",
+        // identifier-based search: "SRH-42" starts with "SRH" — exact prefix match
+        linearIssueIdentifier: "SRH-42",
       },
       {
         id: titleMatchId,
         companyId,
-        title: "Search ranking issue",
-        status: "todo",
-        priority: "medium",
+        // contains "SRH" — contains match, ranks after starts-with
+        linearIssueIdentifier: "X-SRH-1",
       },
       {
         id: descriptionMatchId,
         companyId,
-        title: "Another item",
-        description: "Contains the search keyword",
-        status: "todo",
-        priority: "medium",
+        // no match for "SRH"
+        linearIssueIdentifier: "PLN-5",
       },
     ]);
 
     const result = await svc.list(companyId, {
-      q: "search",
+      q: "SRH",
       limit: 2,
     });
 
-    expect(result.map((issue) => issue.id)).toEqual([titleMatchId, descriptionMatchId]);
+    // "SRH-42" starts with "SRH" (rank 0); "X-SRH-1" contains "SRH" (rank 3); "PLN-5" does not match.
+    expect(result.map((issue) => issue.id)).toEqual([exactIdentifierId, titleMatchId]);
   });
 
   // TODO(messaging-phase2): comment body search is disabled while bodies
@@ -369,11 +346,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.insert(issues).values({
       id: issueId,
       companyId,
-      issueNumber: 1064,
-      identifier: "PAP-1064",
-      title: "Feedback votes error",
-      status: "todo",
-      priority: "medium",
+      linearIssueIdentifier: "PAP-1064",
       createdByUserId: "user-1",
     });
 
@@ -723,10 +696,6 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.insert(issues).values({
       id: issueId,
       companyId,
-      title: "Large issue",
-      description: longDescription,
-      status: "todo",
-      priority: "medium",
       executionPolicy: { stages: Array.from({ length: 20 }, (_, index) => ({ index, kind: "review", notes: "y".repeat(400) })) },
       executionState: { history: Array.from({ length: 20 }, (_, index) => ({ index, body: "z".repeat(400) })) },
       executionWorkspaceSettings: { notes: "w".repeat(2_000) },
@@ -735,7 +704,8 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     const [result] = await svc.list(companyId);
 
     expect(result).toBeTruthy();
-    expect(result?.description).toHaveLength(1200);
+    // description/title/priority live in Linear — null placeholders in list results
+    expect(result?.description).toBeNull();
     expect(result?.executionPolicy).toBeNull();
     expect(result?.executionState).toBeNull();
     expect(result?.executionWorkspaceSettings).toBeNull();
@@ -1138,14 +1108,11 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     const blockerB = randomUUID();
     const blockedIssueId = randomUUID();
     await db.insert(issues).values([
-      { id: blockerA, companyId, title: "Blocker A", status: "done", priority: "medium" },
-      { id: blockerB, companyId, title: "Blocker B", status: "todo", priority: "medium" },
+      { id: blockerA, companyId, completedAt: new Date() },
+      { id: blockerB, companyId },
       {
         id: blockedIssueId,
         companyId,
-        title: "Blocked issue",
-        status: "blocked",
-        priority: "medium",
         assigneeAgentId,
       },
     ]);
@@ -1193,26 +1160,18 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
       {
         id: parentId,
         companyId,
-        title: "Parent issue",
-        status: "todo",
-        priority: "medium",
         assigneeAgentId,
       },
       {
         id: childA,
         companyId,
         parentId,
-        title: "Child A",
-        status: "done",
-        priority: "medium",
+        completedAt: new Date(),
       },
       {
         id: childB,
         companyId,
         parentId,
-        title: "Child B",
-        status: "blocked",
-        priority: "medium",
       },
     ]);
 
@@ -1540,7 +1499,6 @@ describeEmbeddedPostgres("issueService.findMentionedProjectIds", () => {
   it("can skip comment-body scans for bounded issue detail reads", async () => {
     const companyId = randomUUID();
     const issueId = randomUUID();
-    const titleProjectId = randomUUID();
     const commentProjectId = randomUUID();
 
     await db.insert(companies).values({
@@ -1550,29 +1508,18 @@ describeEmbeddedPostgres("issueService.findMentionedProjectIds", () => {
       requireBoardApprovalForNewAgents: false,
     });
 
-    await db.insert(projects).values([
-      {
-        id: titleProjectId,
-        companyId,
-        name: "Title project",
-        status: "in_progress",
-      },
-      {
-        id: commentProjectId,
-        companyId,
-        name: "Comment project",
-        status: "in_progress",
-      },
-    ]);
+    await db.insert(projects).values({
+      id: commentProjectId,
+      companyId,
+      name: "Comment project",
+      status: "in_progress",
+    });
 
+    // title/description no longer in sidecar (Task 3) — project mentions in issue text
+    // are only discoverable via comment bodies now.
     await db.insert(issues).values({
       id: issueId,
       companyId,
-      projectId: titleProjectId,
-      title: `Link [Title](${buildProjectMentionHref(titleProjectId)})`,
-      description: null,
-      status: "todo",
-      priority: "medium",
     });
 
     await postTestComment(db, {
@@ -1582,10 +1529,9 @@ describeEmbeddedPostgres("issueService.findMentionedProjectIds", () => {
       body: `Comment link [Comment](${buildProjectMentionHref(commentProjectId)})`,
     });
 
-    expect(await svc.findMentionedProjectIds(issueId, { includeCommentBodies: false })).toEqual([titleProjectId]);
-    expect(await svc.findMentionedProjectIds(issueId)).toEqual([
-      titleProjectId,
-      commentProjectId,
-    ]);
+    // Without comment scan, no mentions found (title/description gone from DB)
+    expect(await svc.findMentionedProjectIds(issueId, { includeCommentBodies: false })).toEqual([]);
+    // With comment scan, the comment body mention is discovered
+    expect(await svc.findMentionedProjectIds(issueId)).toEqual([commentProjectId]);
   });
 });

@@ -362,12 +362,8 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
       },
     });
 
-    const [issue] = await db
-      .select({ description: issues.description })
-      .from(issues)
-      .where(eq(issues.id, runRes.body.linkedIssueId));
-
-    expect(issue?.description).toBe("Review paperclip for high bugs");
+    // description column dropped in Task 3 — it lives in Linear now.
+    // The triggerPayload already validates variable resolution above.
   });
 
   it("allows drafting a routine without defaults and running it with one-off overrides", async () => {

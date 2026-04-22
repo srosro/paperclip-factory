@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { WebSocketServer } from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -282,12 +282,8 @@ describe("heartbeat comment wake batching", () => {
       await db.insert(issues).values({
         id: issueId,
         companyId,
-        title: "Batch wake comments",
-        status: "todo",
-        priority: "medium",
         assigneeAgentId: agentId,
-        issueNumber: 1,
-        identifier: `${issuePrefix}-1`,
+        linearIssueIdentifier: `${issuePrefix}-1`,
       });
 
       await seedMessagingIdentity(db, { companyId, userId: "user-1" });
@@ -471,12 +467,8 @@ describe("heartbeat comment wake batching", () => {
       await db.insert(issues).values({
         id: issueId,
         companyId,
-        title: "Reopen after deferred comment",
-        status: "todo",
-        priority: "medium",
         assigneeAgentId: agentId,
-        issueNumber: 1,
-        identifier: `${issuePrefix}-1`,
+        linearIssueIdentifier: `${issuePrefix}-1`,
       });
 
       await seedMessagingIdentity(db, { companyId, userId: "user-1" });
@@ -559,7 +551,6 @@ describe("heartbeat comment wake batching", () => {
       await db
         .update(issues)
         .set({
-          status: "done",
           completedAt: new Date(),
           executionRunId: null,
           executionAgentNameKey: null,
@@ -581,7 +572,14 @@ describe("heartbeat comment wake batching", () => {
 
       const reopenedIssue = await db
         .select({
-          status: issues.status,
+          status: sql<string>`
+            CASE
+              WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+              WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+              WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+              ELSE 'todo'
+            END
+          `,
           completedAt: issues.completedAt,
         })
         .from(issues)
@@ -602,9 +600,10 @@ describe("heartbeat comment wake batching", () => {
           issue: {
             id: issueId,
             identifier: `${issuePrefix}-1`,
-            title: "Reopen after deferred comment",
+            // title/priority live in Linear (Task 3+), placeholders until Task 6 enriches
+            title: "",
             status: "in_progress",
-            priority: "medium",
+            priority: "none",
           },
         },
       });
@@ -655,12 +654,8 @@ describe("heartbeat comment wake batching", () => {
       await db.insert(issues).values({
         id: issueId,
         companyId,
-        title: "Require a comment",
-        status: "todo",
-        priority: "medium",
         assigneeAgentId: agentId,
-        issueNumber: 1,
-        identifier: `${issuePrefix}-1`,
+        linearIssueIdentifier: `${issuePrefix}-1`,
       });
 
       const firstRun = await heartbeat.wakeup(agentId, {
@@ -686,9 +681,10 @@ describe("heartbeat comment wake batching", () => {
           issue: {
             id: issueId,
             identifier: `${issuePrefix}-1`,
-            title: "Require a comment",
+            // title/priority live in Linear (Task 3+), placeholders until Task 6 enriches
+            title: "",
             status: "in_progress",
-            priority: "medium",
+            priority: "none",
           },
           checkedOutByHarness: true,
           commentIds: [],
@@ -700,10 +696,18 @@ describe("heartbeat comment wake batching", () => {
       expect(String(firstPayload.message ?? "")).toContain(
         "The harness already checked out this issue for the current run.",
       );
-      expect(String(firstPayload.message ?? "")).toContain(`${issuePrefix}-1 Require a comment`);
+      // Title lives in Linear (Task 3+); message only contains the identifier now.
+      expect(String(firstPayload.message ?? "")).toContain(`${issuePrefix}-1`);
       const checkedOutIssue = await db
         .select({
-          status: issues.status,
+          status: sql<string>`
+            CASE
+              WHEN ${issues.cancelledAt} IS NOT NULL THEN 'cancelled'
+              WHEN ${issues.completedAt} IS NOT NULL THEN 'done'
+              WHEN ${issues.startedAt}   IS NOT NULL THEN 'in_progress'
+              ELSE 'todo'
+            END
+          `,
           checkoutRunId: issues.checkoutRunId,
           executionRunId: issues.executionRunId,
         })
@@ -829,12 +833,8 @@ describe("heartbeat comment wake batching", () => {
       await db.insert(issues).values({
         id: issueId,
         companyId,
-        title: "Prevent concurrent mention execution",
-        status: "todo",
-        priority: "high",
         assigneeAgentId: primaryAgentId,
-        issueNumber: 1,
-        identifier: `${issuePrefix}-1`,
+        linearIssueIdentifier: `${issuePrefix}-1`,
       });
 
       const primaryRun = await heartbeat.wakeup(primaryAgentId, {
@@ -968,12 +968,8 @@ describe("heartbeat comment wake batching", () => {
       await db.insert(issues).values({
         id: issueId,
         companyId,
-        title: "Use existing comment",
-        status: "todo",
-        priority: "medium",
         assigneeAgentId: agentId,
-        issueNumber: 1,
-        identifier: `${issuePrefix}-1`,
+        linearIssueIdentifier: `${issuePrefix}-1`,
       });
 
       const firstRun = await heartbeat.wakeup(agentId, {

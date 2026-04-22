@@ -255,9 +255,7 @@ describeEmbeddedPostgres("workspace runtime service authz helper", () => {
       companyId,
       projectId,
       projectWorkspaceId,
-      title: "Completed issue",
-      status: "done",
-      priority: "medium",
+      completedAt: new Date(),
       assigneeAgentId: agentId,
     });
 
