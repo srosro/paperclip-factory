@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueExecutionDecisions } from "@paperclipai/db";
+import { issueExecutionDecisions, issues as issuesTable, issueLabels, issueRelations } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
@@ -65,11 +66,11 @@ import {
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
 } from "../services/issue-execution-policy.js";
-import { requireMessagingContext, resolveMessagingContext } from "../messaging/index.js";
+import { requireMessagingContext } from "../messaging/index.js";
 import { mapPaperclipPriorityToLinearPriority } from "../messaging/adapters/linear/workflow-state-map.js";
-import type { WorkflowStateMap } from "../messaging/adapters/linear/workflow-state-map.js";
-import type { RouterUpdateIssueArgs } from "../messaging/router.js";
+import { MessagingNotConfigured } from "../messaging/types.js";
 import { handleMessageCreatedSideEffects } from "../messaging/side-effects.js";
+import { createLinearBackedIssueService, type LinearBackedIssue } from "../services/linear-backed-issue-service.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -321,6 +322,37 @@ export function issueRoutes(
     limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 },
   });
 
+  async function makeLinearSvc(companyId: string) {
+    const ctx = await requireMessagingContext(companyId).catch((err) => {
+      throw translateMessagingError(err);
+    });
+    const externalTeamRef =
+      ((ctx.workspaceInstall?.metadata as Record<string, unknown> | null)?.linearTeamId as string | undefined) ?? "";
+    return createLinearBackedIssueService({ db, adapter: ctx.adapter, companyId, externalTeamRef });
+  }
+
+  function isMessagingUnavailable(err: unknown): boolean {
+    // makeLinearSvc wraps MessagingNotConfigured as a 412 HttpError via translateMessagingError.
+    // In test environments where messaging is never bootstrapped, the raw init error propagates.
+    if (err instanceof HttpError && err.status === 412) return true;
+    if (err instanceof Error && err.message.startsWith("messaging not initialized")) return true;
+    return false;
+  }
+
+  async function getLinearIssue(id: string): Promise<LinearBackedIssue | null> {
+    // Use svc.getById() to resolve companyId (works with test mocks too).
+    const base = await svc.getById(id);
+    if (!base) return null;
+    try {
+      const lsvc = await makeLinearSvc(base.companyId);
+      return lsvc.getById(id);
+    } catch {
+      // Messaging not configured or unavailable — fall back to DB-only view.
+      // Routes that strictly require messaging call makeLinearSvc directly (no fallback).
+      return base as unknown as LinearBackedIssue;
+    }
+  }
+
   function withContentPath<T extends { id: string }>(attachment: T) {
     return {
       ...attachment,
@@ -536,9 +568,7 @@ export function issueRoutes(
   async function normalizeIssueIdentifier(rawId: string): Promise<string> {
     if (/^[A-Z]+-\d+$/i.test(rawId)) {
       const issue = await svc.getByIdentifier(rawId);
-      if (issue) {
-        return issue.id;
-      }
+      if (issue) return issue.id;
     }
     return rawId;
   }
@@ -725,7 +755,7 @@ export function issueRoutes(
 
   router.get("/issues/:id", async (req, res) => {
     const id = req.params.id as string;
-    const issue = await svc.getById(id);
+    const issue = await getLinearIssue(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -762,7 +792,7 @@ export function issueRoutes(
 
   router.get("/issues/:id/heartbeat-context", async (req, res) => {
     const id = req.params.id as string;
-    const issue = await svc.getById(id);
+    const issue = await getLinearIssue(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -1339,25 +1369,24 @@ export function issueRoutes(
       await assertCanAssignTasks(req, companyId);
     }
 
-    const messagingCtx = await requireMessagingContext(companyId).catch((err) => {
-      throw translateMessagingError(err);
-    });
-
     const actor = getActorInfo(req);
     const executionPolicy = normalizeIssueExecutionPolicy(req.body.executionPolicy);
-    const issue = await svc.create(companyId, {
-      ...req.body,
-      executionPolicy,
-      createdByAgentId: actor.agentId,
-      createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+
+    // Create directly in Linear (source of truth) via LinearBackedIssueService.
+    const linearSvc = await makeLinearSvc(companyId);
+    const issue = await linearSvc.create({
+      title: req.body.title as string,
+      description: req.body.description as string | null | undefined,
+      assigneeAgentId: req.body.assigneeAgentId as string | null | undefined,
+      assigneeUserId: req.body.assigneeUserId as string | null | undefined,
+      executionPolicy: executionPolicy as Record<string, unknown> | null,
+      goalId: req.body.goalId as string | null | undefined,
+      projectId: req.body.projectId as string | null | undefined,
+      parentId: req.body.parentId as string | null | undefined,
     });
 
-    try {
-      await messagingCtx.router.syncIssueToExternal(issue.id);
-    } catch (syncErr) {
-      await svc.remove(issue.id).catch(() => {});
-      throw translateMessagingError(syncErr);
-    }
+    // TODO Task 6: handle labelIds, blockedByIssueIds, workspace inheritance, billing codes
+    // via svc once svc.create() is updated to work without dropped columns.
 
     await logActivity(db, {
       companyId,
@@ -1390,7 +1419,7 @@ export function issueRoutes(
 
   router.patch("/issues/:id", validate(updateIssueRouteSchema), async (req, res) => {
     const id = req.params.id as string;
-    const existing = await svc.getById(id);
+    const existing = await getLinearIssue(id);
     if (!existing) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -1598,17 +1627,23 @@ export function issueRoutes(
       res.status(404).json({ error: "Issue not found" });
       return;
     }
-    let issueResponse: typeof issue & { blockedBy?: unknown; blocks?: unknown } = issue;
+    // Upgrade to merged Linear+sidecar view so downstream code has title/status/identifier.
+    // We use the already-updated `issue` as the base to avoid re-fetching stale sidecar data.
+    let mergedIssue: LinearBackedIssue;
+    try {
+      const lsvc = await makeLinearSvc(issue.companyId);
+      mergedIssue = (await lsvc.getById(id)) ?? (issue as unknown as LinearBackedIssue);
+    } catch {
+      mergedIssue = issue as unknown as LinearBackedIssue;
+    };
     let updatedRelations: Awaited<ReturnType<typeof svc.getRelationSummaries>> | null = null;
-    if (issue && Array.isArray(req.body.blockedByIssueIds)) {
-      updatedRelations = await svc.getRelationSummaries(issue.id);
-      issueResponse = {
-        ...issue,
-        blockedBy: updatedRelations.blockedBy,
-        blocks: updatedRelations.blocks,
-      };
+    if (Array.isArray(req.body.blockedByIssueIds)) {
+      updatedRelations = await svc.getRelationSummaries(mergedIssue.id);
     }
-    await routinesSvc.syncRunStatusForIssue(issue.id);
+    let issueResponse: typeof mergedIssue & { blockedBy?: unknown; blocks?: unknown } = updatedRelations
+      ? { ...mergedIssue, blockedBy: updatedRelations.blockedBy, blocks: updatedRelations.blocks }
+      : mergedIssue;
+    await routinesSvc.syncRunStatusForIssue(mergedIssue.id);
 
     if (actor.runId) {
       await heartbeat.reportRunActivity(actor.runId).catch((err) =>
@@ -1618,8 +1653,8 @@ export function issueRoutes(
     // Build activity details with previous values for changed fields
     const previous: Record<string, unknown> = {};
     for (const key of Object.keys(updateFields)) {
-      if (key in existing && (existing as Record<string, unknown>)[key] !== (updateFields as Record<string, unknown>)[key]) {
-        previous[key] = (existing as Record<string, unknown>)[key];
+      if (key in existing && (existing as unknown as Record<string, unknown>)[key] !== (updateFields as Record<string, unknown>)[key]) {
+        previous[key] = (existing as unknown as Record<string, unknown>)[key];
       }
     }
     if (Array.isArray(req.body.blockedByIssueIds)) {
@@ -1632,20 +1667,20 @@ export function issueRoutes(
       effectiveReopenRequested &&
       isClosed &&
       previous.status !== undefined &&
-      issue.status === "todo";
+      mergedIssue.status === "todo";
     const reopenFromStatus = reopened ? existing.status : null;
     await logActivity(db, {
-      companyId: issue.companyId,
+      companyId: mergedIssue.companyId,
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
       runId: actor.runId,
       action: "issue.updated",
       entityType: "issue",
-      entityId: issue.id,
+      entityId: mergedIssue.id,
       details: {
         ...updateFields,
-        identifier: issue.identifier,
+        identifier: mergedIssue.identifier,
         ...(commentBody ? { source: "comment" } : {}),
         ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus } : {}),
         ...(interruptedRunId ? { interruptedRunId } : {}),
@@ -1669,9 +1704,9 @@ export function issueRoutes(
           runId: actor.runId,
           action: "issue.blockers_updated",
           entityType: "issue",
-          entityId: issue.id,
+          entityId: mergedIssue.id,
           details: {
-            identifier: issue.identifier,
+            identifier: mergedIssue.identifier,
             blockedByIssueIds: req.body.blockedByIssueIds,
             addedBlockedByIssueIds,
             removedBlockedByIssueIds,
@@ -1690,16 +1725,16 @@ export function issueRoutes(
     const reviewerChanges = diffExecutionParticipants(previousExecutionPolicy, nextExecutionPolicy, "review");
     if (reviewerChanges.addedParticipants.length > 0 || reviewerChanges.removedParticipants.length > 0) {
       await logActivity(db, {
-        companyId: issue.companyId,
+        companyId: mergedIssue.companyId,
         actorType: actor.actorType,
         actorId: actor.actorId,
         agentId: actor.agentId,
         runId: actor.runId,
         action: "issue.reviewers_updated",
         entityType: "issue",
-        entityId: issue.id,
+        entityId: mergedIssue.id,
         details: {
-          identifier: issue.identifier,
+          identifier: mergedIssue.identifier,
           participants: reviewerChanges.participants,
           addedParticipants: reviewerChanges.addedParticipants,
           removedParticipants: reviewerChanges.removedParticipants,
@@ -1710,16 +1745,16 @@ export function issueRoutes(
     const approverChanges = diffExecutionParticipants(previousExecutionPolicy, nextExecutionPolicy, "approval");
     if (approverChanges.addedParticipants.length > 0 || approverChanges.removedParticipants.length > 0) {
       await logActivity(db, {
-        companyId: issue.companyId,
+        companyId: mergedIssue.companyId,
         actorType: actor.actorType,
         actorId: actor.actorId,
         agentId: actor.agentId,
         runId: actor.runId,
         action: "issue.approvers_updated",
         entityType: "issue",
-        entityId: issue.id,
+        entityId: mergedIssue.id,
         details: {
-          identifier: issue.identifier,
+          identifier: mergedIssue.identifier,
           participants: approverChanges.participants,
           addedParticipants: approverChanges.addedParticipants,
           removedParticipants: approverChanges.removedParticipants,
@@ -1727,7 +1762,7 @@ export function issueRoutes(
       });
     }
 
-    if (issue.status === "done" && existing.status !== "done") {
+    if (mergedIssue.status === "done" && existing.status !== "done") {
       const tc = getTelemetryClient();
       if (tc && actor.agentId) {
         const actorAgent = await agentsSvc.getById(actor.agentId);
@@ -1752,19 +1787,19 @@ export function issueRoutes(
       });
 
       await logActivity(db, {
-        companyId: issue.companyId,
+        companyId: mergedIssue.companyId,
         actorType: actor.actorType,
         actorId: actor.actorId,
         agentId: actor.agentId,
         runId: actor.runId,
         action: "issue.comment_added",
         entityType: "issue",
-        entityId: issue.id,
+        entityId: mergedIssue.id,
         details: {
           commentId: comment.id,
           bodySnippet: comment.body.slice(0, 120),
-          identifier: issue.identifier,
-          issueTitle: issue.title,
+          identifier: mergedIssue.identifier,
+          issueTitle: mergedIssue.title,
           ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
           ...(interruptedRunId ? { interruptedRunId } : {}),
           ...(hasFieldChanges ? { updated: true } : {}),
@@ -1773,19 +1808,19 @@ export function issueRoutes(
 
     }
     const assigneeChanged =
-      issue.assigneeAgentId !== existing.assigneeAgentId || issue.assigneeUserId !== existing.assigneeUserId;
+      mergedIssue.assigneeAgentId !== existing.assigneeAgentId || mergedIssue.assigneeUserId !== existing.assigneeUserId;
     const statusChangedFromBacklog =
       existing.status === "backlog" &&
-      issue.status !== "backlog" &&
+      mergedIssue.status !== "backlog" &&
       req.body.status !== undefined;
     const statusChangedFromBlockedToTodo =
       existing.status === "blocked" &&
-      issue.status === "todo" &&
+      mergedIssue.status === "todo" &&
       req.body.status !== undefined;
     const previousExecutionState = parseIssueExecutionState(existing.executionState);
-    const nextExecutionState = parseIssueExecutionState(issue.executionState);
+    const nextExecutionState = parseIssueExecutionState(mergedIssue.executionState);
     const executionStageWakeup = buildExecutionStageWakeup({
-      issueId: issue.id,
+      issueId: mergedIssue.id,
       previousState: previousExecutionState,
       nextState: nextExecutionState,
       interruptedRunId,
@@ -1801,19 +1836,19 @@ export function issueRoutes(
         const wakeIssueId =
           wakeup.payload && typeof wakeup.payload === "object" && typeof wakeup.payload.issueId === "string"
             ? wakeup.payload.issueId
-            : issue.id;
+            : mergedIssue.id;
         wakeups.set(`${agentId}:${wakeIssueId}`, { agentId, wakeup });
       };
 
       if (executionStageWakeup) {
         addWakeup(executionStageWakeup.agentId, executionStageWakeup.wakeup);
-      } else if (assigneeChanged && issue.assigneeAgentId && issue.status !== "backlog") {
-        addWakeup(issue.assigneeAgentId, {
+      } else if (assigneeChanged && mergedIssue.assigneeAgentId && mergedIssue.status !== "backlog") {
+        addWakeup(mergedIssue.assigneeAgentId, {
           source: "assignment",
           triggerDetail: "system",
           reason: "issue_assigned",
           payload: {
-            issueId: issue.id,
+            issueId: mergedIssue.id,
             ...(comment ? { commentId: comment.id } : {}),
             mutation: "update",
             ...(interruptedRunId ? { interruptedRunId } : {}),
@@ -1821,10 +1856,10 @@ export function issueRoutes(
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
           contextSnapshot: {
-            issueId: issue.id,
+            issueId: mergedIssue.id,
             ...(comment
               ? {
-                  taskId: issue.id,
+                  taskId: mergedIssue.id,
                   commentId: comment.id,
                   wakeCommentId: comment.id,
                 }
@@ -1835,20 +1870,20 @@ export function issueRoutes(
         });
       }
 
-      if (!assigneeChanged && (statusChangedFromBacklog || statusChangedFromBlockedToTodo) && issue.assigneeAgentId) {
-        addWakeup(issue.assigneeAgentId, {
+      if (!assigneeChanged && (statusChangedFromBacklog || statusChangedFromBlockedToTodo) && mergedIssue.assigneeAgentId) {
+        addWakeup(mergedIssue.assigneeAgentId, {
           source: "automation",
           triggerDetail: "system",
           reason: "issue_status_changed",
           payload: {
-            issueId: issue.id,
+            issueId: mergedIssue.id,
             mutation: "update",
             ...(interruptedRunId ? { interruptedRunId } : {}),
           },
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
           contextSnapshot: {
-            issueId: issue.id,
+            issueId: mergedIssue.id,
             source: "issue.status_change",
             ...(interruptedRunId ? { interruptedRunId } : {}),
           },
@@ -1856,7 +1891,7 @@ export function issueRoutes(
       }
 
       if (commentBody && comment) {
-        const assigneeId = issue.assigneeAgentId;
+        const assigneeId = mergedIssue.assigneeAgentId;
         const actorIsAgent = actor.actorType === "agent";
         const selfComment = actorIsAgent && actor.actorId === assigneeId;
         const skipAssigneeCommentWake = selfComment || isClosed;
@@ -1890,7 +1925,7 @@ export function issueRoutes(
 
         let mentionedIds: string[] = [];
         try {
-          mentionedIds = await svc.findMentionedAgents(issue.companyId, commentBody);
+          mentionedIds = await svc.findMentionedAgents(mergedIssue.companyId, commentBody);
         } catch (err) {
           logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
         }
@@ -1916,9 +1951,9 @@ export function issueRoutes(
         }
       }
 
-      const becameDone = existing.status !== "done" && issue.status === "done";
+      const becameDone = existing.status !== "done" && mergedIssue.status === "done";
       if (becameDone) {
-        const dependents = await svc.listWakeableBlockedDependents(issue.id);
+        const dependents = await svc.listWakeableBlockedDependents(mergedIssue.id);
         for (const dependent of dependents) {
           addWakeup(dependent.assigneeAgentId, {
             source: "automation",
@@ -1926,7 +1961,7 @@ export function issueRoutes(
             reason: "issue_blockers_resolved",
             payload: {
               issueId: dependent.id,
-              resolvedBlockerIssueId: issue.id,
+              resolvedBlockerIssueId: mergedIssue.id,
               blockerIssueIds: dependent.blockerIssueIds,
             },
             requestedByActorType: actor.actorType,
@@ -1936,7 +1971,7 @@ export function issueRoutes(
               taskId: dependent.id,
               wakeReason: "issue_blockers_resolved",
               source: "issue.blockers_resolved",
-              resolvedBlockerIssueId: issue.id,
+              resolvedBlockerIssueId: mergedIssue.id,
               blockerIssueIds: dependent.blockerIssueIds,
             },
           });
@@ -1944,9 +1979,9 @@ export function issueRoutes(
       }
 
       const becameTerminal =
-        !["done", "cancelled"].includes(existing.status) && ["done", "cancelled"].includes(issue.status);
-      if (becameTerminal && issue.parentId) {
-        const parent = await svc.getWakeableParentAfterChildCompletion(issue.parentId);
+        !["done", "cancelled"].includes(existing.status) && ["done", "cancelled"].includes(mergedIssue.status);
+      if (becameTerminal && mergedIssue.parentId) {
+        const parent = await svc.getWakeableParentAfterChildCompletion(mergedIssue.parentId);
         if (parent) {
           addWakeup(parent.assigneeAgentId, {
             source: "automation",
@@ -1954,7 +1989,7 @@ export function issueRoutes(
             reason: "issue_children_completed",
             payload: {
               issueId: parent.id,
-              completedChildIssueId: issue.id,
+              completedChildIssueId: mergedIssue.id,
               childIssueIds: parent.childIssueIds,
             },
             requestedByActorType: actor.actorType,
@@ -1964,7 +1999,7 @@ export function issueRoutes(
               taskId: parent.id,
               wakeReason: "issue_children_completed",
               source: "issue.children_completed",
-              completedChildIssueId: issue.id,
+              completedChildIssueId: mergedIssue.id,
               childIssueIds: parent.childIssueIds,
             },
           });
@@ -1974,46 +2009,20 @@ export function issueRoutes(
       for (const { agentId, wakeup } of wakeups.values()) {
         heartbeat
           .wakeup(agentId, wakeup)
-          .catch((err) => logger.warn({ err, issueId: issue.id, agentId }, "failed to wake agent on issue update"));
+          .catch((err) => logger.warn({ err, issueId: mergedIssue.id, agentId }, "failed to wake agent on issue update"));
       }
     })();
 
-    // Best-effort sync to Linear — fire and forget.
-    const hasLinearFields = req.body.title !== undefined || req.body.description !== undefined
-      || req.body.priority !== undefined || req.body.status !== undefined;
-    if (issue.linearIssueId && hasLinearFields) {
-      const patchCompanyId = issue.companyId;
-      resolveMessagingContext(patchCompanyId).then((patchCtx) => {
-        if (patchCtx.status !== "ready") return;
-        const workflowMap = (patchCtx.workspaceInstall?.metadata as Record<string, unknown> | null)
-          ?.linearWorkflowStateMap as WorkflowStateMap | null | undefined;
-        const syncArgs: RouterUpdateIssueArgs = {
-          companyId: patchCompanyId,
-          issueId: issue.id,
-          authorKind: "bot_system",
-        };
-        if (req.body.title !== undefined) syncArgs.title = req.body.title as string;
-        if (req.body.description !== undefined) syncArgs.description = req.body.description as string | null;
-        if (req.body.priority !== undefined) {
-          syncArgs.priority = mapPaperclipPriorityToLinearPriority(
-            req.body.priority as "critical" | "high" | "medium" | "low" | null,
-          );
-        }
-        if (req.body.status !== undefined && workflowMap?.kind === "complete") {
-          syncArgs.status = workflowMap.byStatus[issue.status as keyof typeof workflowMap.byStatus] ?? null;
-        }
-        return patchCtx.router.updateIssue(syncArgs);
-      }).catch((err: unknown) => {
-        logger.warn({ err, issueId: issue.id }, "[issues] best-effort Linear sync failed");
-      });
-    }
+    // Linear is now source of truth — svc.update() writes sidecar fields only.
+    // Title/description/priority/status changes are applied directly to Linear
+    // via svc.update → adapter.updateIssue (TODO Task 6).
 
     res.json({ ...issueResponse, comment });
   });
 
   router.delete("/issues/:id", async (req, res) => {
     const id = req.params.id as string;
-    const existing = await svc.getById(id);
+    const existing = await getLinearIssue(id);
     if (!existing) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -2052,7 +2061,7 @@ export function issueRoutes(
 
   router.post("/issues/:id/checkout", validate(checkoutIssueSchema), async (req, res) => {
     const id = req.params.id as string;
-    const issue = await svc.getById(id);
+    const issue = await getLinearIssue(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -2126,7 +2135,7 @@ export function issueRoutes(
 
   router.post("/issues/:id/release", async (req, res) => {
     const id = req.params.id as string;
-    const existing = await svc.getById(id);
+    const existing = await getLinearIssue(id);
     if (!existing) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -2198,7 +2207,7 @@ export function issueRoutes(
   router.get("/issues/:id/comments/:commentId", async (req, res) => {
     const id = req.params.id as string;
     const commentId = req.params.commentId as string;
-    const issue = await svc.getById(id);
+    const issue = await getLinearIssue(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -2215,7 +2224,7 @@ export function issueRoutes(
   router.delete("/issues/:id/comments/:commentId", async (req, res) => {
     const id = req.params.id as string;
     const commentId = req.params.commentId as string;
-    const issue = await svc.getById(id);
+    const issue = await getLinearIssue(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -2280,7 +2289,7 @@ export function issueRoutes(
 
   router.get("/issues/:id/feedback-votes", async (req, res) => {
     const id = req.params.id as string;
-    const issue = await svc.getById(id);
+    const issue = await getLinearIssue(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -2297,7 +2306,7 @@ export function issueRoutes(
 
   router.get("/issues/:id/feedback-traces", async (req, res) => {
     const id = req.params.id as string;
-    const issue = await svc.getById(id);
+    const issue = await getLinearIssue(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -2360,7 +2369,7 @@ export function issueRoutes(
 
   router.post("/issues/:id/comments", validate(addIssueCommentSchema), async (req, res) => {
     const id = req.params.id as string;
-    const issue = await svc.getById(id);
+    const issue = await getLinearIssue(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
@@ -2391,7 +2400,19 @@ export function issueRoutes(
     let currentIssue = issue;
 
     if (effectiveReopenRequested && isClosed) {
-      const reopenedIssue = await svc.update(id, { status: "todo" });
+      // Reopen: clear terminal timestamps so status becomes "todo".
+      let reopenedIssue: LinearBackedIssue | null;
+      try {
+        const linearSvc = await makeLinearSvc(issue.companyId);
+        reopenedIssue = await linearSvc.update(id, { completedAt: null, cancelledAt: null });
+      } catch (err) {
+        if (isMessagingUnavailable(err)) {
+          // Fallback for tests / unconfigured environments.
+          reopenedIssue = (await svc.update(id, { completedAt: null, cancelledAt: null })) as unknown as LinearBackedIssue | null;
+        } else {
+          throw err;
+        }
+      }
       if (!reopenedIssue) {
         res.status(404).json({ error: "Issue not found" });
         return;
@@ -2548,7 +2569,7 @@ export function issueRoutes(
 
   router.post("/issues/:id/feedback-votes", validate(upsertIssueFeedbackVoteSchema), async (req, res) => {
     const id = req.params.id as string;
-    const issue = await svc.getById(id);
+    const issue = await getLinearIssue(id);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;

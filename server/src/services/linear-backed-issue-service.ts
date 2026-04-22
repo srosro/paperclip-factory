@@ -16,11 +16,18 @@ export interface LinearBackedIssue extends Issue {
   companyId: string;
   linearIssueId: string | null;
   linearIssueIdentifier: string | null;
+  /** Paperclip status string derived from sidecar timestamps. */
+  status: string;
   assigneeAgentId: string | null;
   assigneeUserId: string | null;
+  createdByAgentId: string | null;
+  createdByUserId: string | null;
   executionPolicy: Record<string, unknown> | null;
   executionState: Record<string, unknown> | null;
+  executionRunId: string | null;
+  executionWorkspaceId: string | null;
   goalId: string | null;
+  parentId: string | null;
   projectId: string | null;
   hiddenAt: Date | null;
   startedAt: Date | null;
@@ -80,23 +87,36 @@ export function createLinearBackedIssueService(deps: LinearBackedIssueServiceDep
     linearIssue: Issue,
     sidecar: typeof issuesTable.$inferSelect | null,
   ): LinearBackedIssue {
+    const cancelledAt = sidecar?.cancelledAt ?? null;
+    const completedAt = sidecar?.completedAt ?? null;
+    const startedAt = sidecar?.startedAt ?? null;
+    const status = cancelledAt ? "cancelled"
+      : completedAt ? "done"
+      : startedAt ? "in_progress"
+      : "todo";
     return {
       ...linearIssue,
       // id is null when no sidecar exists (issue lives only in Linear, not in Paperclip yet)
       id: sidecar?.id as string,
-      companyId,
+      companyId: sidecar?.companyId ?? companyId,
       linearIssueId: sidecar?.linearIssueId ?? linearIssue.externalIssueRef,
       linearIssueIdentifier: sidecar?.linearIssueIdentifier ?? linearIssue.identifier,
+      status,
       assigneeAgentId: sidecar?.assigneeAgentId ?? null,
       assigneeUserId: sidecar?.assigneeUserId ?? null,
+      createdByAgentId: sidecar?.createdByAgentId ?? null,
+      createdByUserId: sidecar?.createdByUserId ?? null,
       executionPolicy: (sidecar?.executionPolicy as Record<string, unknown> | null) ?? null,
       executionState: (sidecar?.executionState as Record<string, unknown> | null) ?? null,
+      executionRunId: sidecar?.executionRunId ?? null,
+      executionWorkspaceId: sidecar?.executionWorkspaceId ?? null,
       goalId: sidecar?.goalId ?? null,
+      parentId: sidecar?.parentId ?? null,
       projectId: sidecar?.projectId ?? null,
       hiddenAt: sidecar?.hiddenAt ?? null,
-      startedAt: sidecar?.startedAt ?? null,
-      completedAt: sidecar?.completedAt ?? null,
-      cancelledAt: sidecar?.cancelledAt ?? null,
+      startedAt,
+      completedAt,
+      cancelledAt,
     };
   }
 
